@@ -42,6 +42,15 @@ void loop() {}
 See `examples/tts_i2s_output/` for the complete, board-setting-annotated version of this
 sketch (it needs specific board settings to compile — see "Requirements" below).
 
+## Sample audio
+
+Generated `hello_world.wav` from this project:
+
+<audio controls src="docs/assets/hello_world.wav"></audio>
+
+If your Markdown renderer doesn't support inline audio controls, use this direct link:
+[`docs/assets/hello_world.wav`](docs/assets/hello_world.wav)
+
 ## How it works
 
 TinyTTS's model has four stages -- `text_encoder`, `flow`, `duration_predictor`, and
