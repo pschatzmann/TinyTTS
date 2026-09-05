@@ -98,7 +98,7 @@ def main():
     net_g = load_model()
 
     export_state_dict_subset(
-        net_g, ["enc_p.", "flow.", "emb_g."], os.path.join(OUT_DIR, "weights.bin"),
+        net_g, ["enc_p.", "flow.", "emb_g.", "dp.", "dec."], os.path.join(OUT_DIR, "weights.bin"),
         exclude=UNUSED_BERT_PROJ_WEIGHTS, dtype="float16",
     )
 
@@ -138,6 +138,7 @@ def main():
         z_p_pt = torch.randn(1, MODEL_PARAMS["inter_channels"], y_len)
         y_mask_pt = torch.ones(1, 1, y_len)
         z_pt = net_g.flow(z_p_pt, y_mask_pt, g=g, reverse=True)
+        audio_pt = net_g.dec(z_pt, g=g)
 
     with open(os.path.join(OUT_DIR, "test_vectors.bin"), "wb") as f:
         write_tensor(f, "phone_ids", phone_ids.numpy())
@@ -157,6 +158,7 @@ def main():
         write_tensor(f, "durations_ref", durations.numpy().astype("int32").reshape(1, 1, -1))
         write_tensor(f, "m_p_exp_ref", m_p_exp_pt.numpy())
         write_tensor(f, "logs_p_exp_ref", logs_p_exp_pt.numpy())
+        write_tensor(f, "audio_ref", audio_pt.numpy())
         write_terminator(f)
     print("wrote test_vectors.bin")
     print(f"T={T} y_len={y_len}")

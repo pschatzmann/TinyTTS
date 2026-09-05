@@ -14,7 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace tts_model_data {
+namespace tinytts {
 
 inline const unsigned char default_cmudict[] =
 "\107\342\001\000\000\000\000\000\022\000\000\000\036\000\000\000\053\000\000\000\070\000\000\000\102\000\000\000\114\000\000\000"
@@ -108589,4 +108589,4 @@ inline const unsigned char default_cmudict[] =
 ;
 inline const size_t default_cmudict_len = 3474199;
 
-}  // namespace tts_model_data
+}  // namespace tinytts

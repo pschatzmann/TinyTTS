@@ -1,0 +1,10 @@
+version: "0.1.0"
+description: "Header-only neural text-to-speech (VITS-style) for ESP32, with no external inference-runtime dependency -- every model stage is hand-written C++."
+url: "https://github.com/pschatzmann/TinyTTS"
+repository: "https://github.com/pschatzmann/TinyTTS.git"
+license: "Apache-2.0"
+targets:
+  - esp32
+  - esp32s2
+  - esp32s3
+  - esp32p4

@@ -1,8 +1,8 @@
 # Architecture: how TinyTTS is actually built, and why
 
-The design decisions behind TinyTTS's four model stages and their quantization choices --
-the "why is it built this way" detail that isn't needed to just use the library (see the
-top-level README for that), but matters if you're modifying it, debugging it, or curious.
+The design decisions behind TinyTTS's four model stages -- the "why is it built this way"
+detail that isn't needed to just use the library (see the top-level README for that), but
+matters if you're modifying it, debugging it, or curious.
 
 ## The four stages
 
@@ -10,8 +10,11 @@ top-level README for that), but matters if you're modifying it, debugging it, or
 |---|---|---|
 | `text_encoder` (phoneme/tone/language embeddings + transformer) | hand-written C++ (`PhonemeEncoder`, `Attention`, `TransformerBlock`) | attention-bearing, `onnx2tf` can't convert it |
 | `flow` (normalizing flow, prior → posterior latent) | hand-written C++ (`Flow`) | same reason — its coupling layers use the same attention module |
-| `duration_predictor` | TFLite Micro (int8 weights, int16 activations) | plain conv + layernorm, converts cleanly |
-| `decoder` (HiFi-GAN-style vocoder) | TFLite Micro (int8 weights, int16 activations) | plain conv/transposed-conv, converts cleanly |
+| `duration_predictor` | hand-written C++ (`DurationPredictor`) | plain Conv1d/ChannelNorm/ReLU -- converts cleanly, but hand-written anyway to drop TFLite Micro's fixed-input-shape limitation entirely |
+| `decoder` (HiFi-GAN-style vocoder) | hand-written C++ (`Decoder`) | plain Conv1d/ConvTranspose1d/LeakyReLU -- same reasoning as `duration_predictor` |
+
+All four stages are hand-written C++ -- there is no TFLite Micro, or any other
+inference-runtime, dependency anywhere in this library.
 
 `text_encoder` and `flow` both use a **windowed relative-position attention** module that
 the ONNX→TFLite converter (`onnx2tf`) cannot handle (three different conversion bugs found
@@ -19,37 +22,23 @@ across three attempted PyTorch-side workarounds, none fully resolved -- see `doc
 for the specifics), so they're implemented directly as hand-written C++ instead of going
 through TFLite Micro at all.
 
-The hand-written C++ was verified bit-exact (cosine similarity 1.000000) against the
-original PyTorch model at multiple sequence lengths before being trusted; see `research/`
-for the validation scripts and `test/` for the ongoing regression harness.
+`duration_predictor` (two stacked Conv1d(kernel_size=3)+ChannelNorm+ReLU layers plus a
+Conv1d(kernel_size=1) projection, with speaker conditioning added before the first conv --
+`tiny_tts.models.synthesizer.DurationEstimator`) and `decoder` (Conv1d pre + 5 upsample
+stages, each a LeakyReLU + ConvTranspose1d + 3 summed dilated ConvResBlocks, + LeakyReLU +
+Conv1d post + tanh -- `tiny_tts.models.synthesizer.WaveformDecoder`) both convert to TFLite
+cleanly on their own -- no attention, nothing `onnx2tf` struggles with. Both were moved to
+hand-written C++ anyway, once the attention primitives (`Ops.h`'s `conv1d`/
+`channelLayerNormInplace`/`reluInplace`, plus `convTranspose1d`/`leakyReluInplace` added for
+`decoder`) already existed for `text_encoder`/`flow`, because doing so removes TFLite Micro's
+fixed-input-shape limitation for these stages entirely: an utterance of any length runs
+through the whole pipeline in a single pass, with no window to slide across it, no
+truncation risk, and no arena-sizing/op-registration/quantization concerns for either stage.
 
-## Why `duration_predictor` and `decoder` both ship as full INT8 with INT16 activations
-
-TFLite Micro has no input-resize API, so both TFLite stages run in fixed-size windows:
-`duration_predictor` processes 32 phonemes at a time (see `docs/text-input.md` for how
-`TinyTTS` slides overlapping windows to handle longer text without that being a hard
-limit), `decoder` generates audio in ~1.1s (96-frame) chunks, streamed to the output as
-each chunk is ready.
-
-`duration_predictor` is essentially lossless at this quantization (cosine similarity
-0.9999 vs. the float32 reference). `decoder` took more investigation: full INT8 with INT16
-activations is the *only* one of four quantization variants studied that TFLite Micro
-actually loads, confirmed with a host-side (x86, ASan) build of the real TFLM
-interpreter/allocator, not just assumed from PC-side quality numbers:
-
-- **float16 weights**: `AllocateTensors()` fails outright -- TFLM's `DEQUANTIZE` kernel
-  only accepts int8/int16/uint8 input, not float16.
-- **dynamic-range int8** (weights-only, float32 activations): fails too -- TFLite Micro
-  does not support "hybrid" models at all (`CONV_2D`'s own prepare step rejects it:
-  "Hybrid models are not supported on TFLite Micro").
-- **full INT8 with INT8 activations**: loads fine, but measurably degrades audio quality
-  (12.4dB SNR, audible noise) vs. the INT16-activation variant's 22.6dB.
-
-On real ESP32-S3 hardware, feeding either of the first two unsupported variants to
-`tflm_esp32` didn't just fail cleanly -- `AllocateTensors()`'s failure path left the heap
-corrupted, surfacing later as a confusing TLSF assert on an unrelated allocation, which is
-what made this take a while to actually root-cause. The decoder's tensor arena also needs
-to be at least ~1.5MB for this model -- `TinyTTS`'s default is 2MB.
+The hand-written C++ was verified bit-exact (cosine similarity 1.000000 for every stage,
+`decoder` included) against the original PyTorch model at multiple sequence lengths before
+being trusted; see `research/` for the validation scripts and `test/` for the ongoing
+regression harness.
 
 ## Text-to-phoneme pipeline
 
@@ -70,13 +59,16 @@ INT8-quantized (symmetric, per output row); the quantization was checked for acc
 model's 70.7%, with only 0.96% of individual predictions differing at all) before shipping
 it, not assumed safe.
 
-## Attention weights (`weights.bin`)
+## Weights (`weights.bin`)
 
-The hand-written `PhonemeEncoder`/`Flow` weights are stored float16 (halves their size for
-a rounding-error-level precision cost -- confirmed via the same cosine-similarity checks
-used elsewhere, `WeightStore.h` expands each value to float32 at parse time so no
-consuming code needs to care), with two tensors dropped entirely: `bert_proj`/
-`ja_bert_proj`'s weight matrices reduce to a constant, since multi-lingual BERT
+Every hand-written stage's weights -- `PhonemeEncoder`/`Flow`/`DurationPredictor`/`Decoder`
+-- live in one buffer, `weights.bin` (`setWeights()`), extracted directly from the upstream
+PyTorch checkpoint by `research/export_weights_and_vectors.py` -- none of them are exported
+via ONNX or any conversion pipeline, since none of the four stages needs one anymore.
+Stored float16 (halves size for a rounding-error-level precision cost -- confirmed via the
+same cosine-similarity checks used elsewhere, `WeightStore.h` expands each value to float32
+at parse time so no consuming code needs to care), with two tensors dropped entirely:
+`bert_proj`/`ja_bert_proj`'s weight matrices reduce to a constant, since multi-lingual BERT
 conditioning is disabled by default (`bert`/`ja_bert` are always a zero tensor, and a
 `Conv1d(kernel_size=1)`'s output with a zero input is just its bias term) -- only their
 small bias vectors are still needed (see `PhonemeEncoder.h`'s `forward()` doc).

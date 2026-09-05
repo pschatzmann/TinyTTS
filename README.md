@@ -1,28 +1,30 @@
 # TinyTTS
 
-[![Arduino Library](https://img.shields.io/badge/Arduino-Library-00979D?logo=arduino&logoColor=white)](https://www.arduino.cc/reference/en/libraries/)
-[![CMake](https://img.shields.io/badge/CMake-supported-064F8C?logo=cmake&logoColor=white)](CMakeLists.txt)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Arduino Library](https://img.shields.io/badge/Arduino-Library-blue?logo=arduino&logoColor=white)](https://www.arduino.cc/reference/en/libraries/)
+[![ESP-IDF Component](https://img.shields.io/badge/ESP--IDF-component-blue?logo=espressif&logoColor=white)](idf_component.yml)
+[![CMake](https://img.shields.io/badge/CMake-supported-blue?logo=cmake&logoColor=white)](CMakeLists.txt)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue)](https://opensource.org/licenses/Apache-2.0)
 
 A header-only C++ port of [tronghieuit/tiny-tts](https://github.com/tronghieuit/tiny-tts) — a
-~1.6M-parameter, VITS-style, end-to-end neural text-to-speech model — for the **ESP32-S3 with
-PSRAM**, as an Arduino library.
+~1.6M-parameter, VITS-style, end-to-end neural text-to-speech model — with **no external
+inference-runtime dependency**, as an Arduino library.
 
 ```cpp
 #include <TinyTTS.h>
-#include "TinyTTS/Data.h"   // example model data shipped with the library
+#include "TinyTTS/data/default_weights_data.h"
+#include "TinyTTS/data/default_cmudict_slim_data.h"
+#include "TinyTTS/data/default_dictionary_model_data.h"
 #include "AudioTools.h"
 
-TinyTTS<> tts;
+TinyTTS tts;
 I2SStream i2s_out;
 
 void setup() {
   // TinyTTS doesn't embed a model itself -- wire one in before begin().
   // See "Model data" below for loading from a File instead.
   tts.setWeights(default_weights, default_weights_len);
-  tts.setDictionary(default_cmudict, default_cmudict_len);
-  tts.setDurationPredictorModel(default_duration_predictor_model, default_duration_predictor_model_len, 32);
-  tts.setDecoderModel(default_decoder_model, default_decoder_model_len, 96);
+  tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
+  tts.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
 
   auto cfg = i2s_out.defaultConfig(TX_MODE);
   cfg.sample_rate = tts.getAudioSampleRate();
@@ -38,50 +40,55 @@ void loop() {}
 ```
 
 See `examples/tts_i2s_output/` for the complete, board-setting-annotated version of this
-sketch (it needs specific board settings to compile — see "Requirements" below). That
-example actually uses the slimmed dictionary + neural G2P model combo instead of the full
-dictionary shown above (see "Model data sizes" below for why that combo is now the smaller,
-better-covering option) — this snippet shows the simpler four-setter form since it doesn't
-need the "why five headers instead of one `TinyTTS/Data.h` include" explanation to make sense.
+sketch (it needs specific board settings to compile — see "Requirements" below).
 
 ## How it works
 
-TinyTTS's model has four stages: `text_encoder` and `flow` run as hand-written C++
-(the ONNX→TFLite converter can't handle their attention module); `duration_predictor` and
-`decoder` run through **TFLite Micro** (via
-[`tflm_esp32`](https://github.com/eloquentarduino/tflm_esp32)), each in a fixed-size window
-since TFLM has no input-resize API -- `speak()` streams audio out one decoder chunk at a
-time and isn't limited to short text either (see `docs/text-input.md` for what you can feed
-it). Text becomes phonemes via `TextG2P` (dictionary lookup → neural G2P fallback →
-character-level fallback), and an optional neural fallback model (`DictionaryModel`) covers
-words the dictionary doesn't. See `docs/architecture.md` for the full breakdown of each
-stage and the quantization choices behind them.
+TinyTTS's model has four stages -- `text_encoder`, `flow`, `duration_predictor`, and
+`decoder` -- all implemented as plain, hand-written C++. **There is no TFLite Micro, or any
+other inference-runtime dependency, anywhere in this library.** Every stage runs in a single
+pass with no fixed-input-shape window to hit, so `speak()` handles text of any length (see
+`docs/text-input.md` for what you can feed it). Text becomes phonemes via `TextG2P`
+(dictionary lookup → neural G2P fallback → character-level fallback), and an optional neural
+fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
+`docs/architecture.md` for the mechanical breakdown of each stage.
 
 ## Requirements
 
-- **Board**: an ESP32-S3 *module* with enough external flash and PSRAM — the S3 die itself
-  has neither; both come from the specific module, and "ESP32-S3" alone doesn't tell you
-  how much of either you have. For example, an N8R8 module has 8MB flash/8MB PSRAM, an N4R2
-  has 4MB flash/2MB PSRAM.
-- **Board settings**: `PSRAM=opi` (or whichever PSRAM mode matches your module) is required
-  regardless of how you load model data. `USBMode=hwcdc,CDCOnBoot=cdc` is needed for
-  native-USB Serial to work on most ESP32-S3 boards at all. If you compile the example
-  model data into flash as shown below, you additionally need `FlashSize=16M` +
-  `PartitionScheme=custom` (using the `partitions.csv` shipped alongside
-  `examples/tts_i2s_output/` — see that file's comments if adapting it for a different flash
-  size).
-- **Libraries**: [`tflm_esp32`](https://github.com/eloquentarduino/tflm_esp32) (TFLite Micro
-  runtime) and [`arduino-audio-tools`](https://github.com/pschatzmann/arduino-audio-tools)
+- **Board**: a module with enough external flash and PSRAM for the model data (see "Model
+  data sizes" below) — the chip die itself typically has neither; both come from the
+  specific module, so check your module's actual flash/PSRAM size rather than assuming from
+  the chip name alone.
+- **Board settings**: whichever PSRAM mode matches your module (e.g. `PSRAM=opi`) is
+  required regardless of how you load model data. If native-USB Serial doesn't work on your
+  board out of the box, check whether it needs a USB-mode board setting. If you compile the
+  example model data into flash as shown below, size the partition scheme to fit it (see the
+  `partitions.csv` shipped alongside `examples/tts_i2s_output/` for a worked example, and
+  adapt it for your own flash size).
+- **Libraries**: just [`arduino-audio-tools`](https://github.com/pschatzmann/arduino-audio-tools)
   (for `I2SStream`/audio output — `TinyTTS` itself only needs a plain Arduino `Print`, so any
-  audio-tools output class works, or your own `Print` implementation).
+  audio-tools output class works, or your own `Print` implementation). No inference-runtime
+  library (TFLite Micro or otherwise) is needed -- every model stage is hand-written C++.
+
+### ESP-IDF
+
+TinyTTS also builds as a plain ESP-IDF component -- point `EXTRA_COMPONENT_DIRS` (or an
+`idf_component.yml` dependency) at this repo, `#include <TinyTTS.h>`, and link against it
+like any other component. There's no Arduino dependency in that path, so use the portable
+API instead of the `Print`/`File` conveniences: `setWeights(data, len)`/
+`setDictionary(data, len)` and `begin(const AudioChunkFn&)` (see `TinyTTS.h`) -- the same
+calls this project's own host tests use.
 
 ### Model data sizes
 
-TinyTTS needs at least four data buffers, provided via setters (see "Model data" below) --
+TinyTTS needs at least two data buffers, provided via setters (see "Model data" below) --
 each can be compiled into flash (`setWeights(data, len)`, ...) or loaded at runtime from
 LittleFS/FFat/SD into PSRAM (`setWeights(file)`, ...). These are the sizes for the model
 this project ships example headers for (`src/TinyTTS/data/*_data.h`); use them to decide
 what fits in flash on your module and what should come from storage instead.
+`duration_predictor` and `decoder` have no data buffers of their own -- both are hand-written
+C++, and their weights are folded into the attention weights buffer below, same as
+`text_encoder`/`flow`.
 
 **Recommended: slimmed dictionary + neural G2P fallback model** (what
 `examples/tts_i2s_output/` actually uses) -- smaller *and* better out-of-dictionary coverage
@@ -89,12 +96,10 @@ than the full dictionary alone:
 
 | Data | Setter | Size |
 |---|---|---:|
-| Attention weights (`default_weights_data.h`) | `setWeights` | 1.30 MB |
+| Weights (all four model stages) (`default_weights_data.h`) | `setWeights` | 2.20 MB |
 | CMU dictionary, slimmed (`default_cmudict_slim_data.h`) | `setDictionary` | 1.07 MB |
 | Neural G2P fallback model (`default_dictionary_model_data.h`) | `setDictionaryModel` | 0.95 MB |
-| `duration_predictor` model (`default_dp_model_data.h`) | `setDurationPredictorModel` | 0.25 MB |
-| `decoder` (vocoder) model (`default_decoder_model_data.h`) | `setDecoderModel` | 0.43 MB |
-| **Total (recommended five)** | | **4.00 MB** |
+| **Total (recommended three)** | | **4.21 MB** |
 
 The slimmed dictionary only contains the ~30% of words neither the neural fallback model
 nor the crude character-level fallback already predicts correctly on its own, so it
@@ -108,20 +113,16 @@ doesn't cover:
 
 | Data | Setter | Size |
 |---|---|---:|
-| Attention weights (`default_weights_data.h`) | `setWeights` | 1.30 MB |
+| Weights (all four model stages) (`default_weights_data.h`) | `setWeights` | 2.20 MB |
 | CMU dictionary (`default_cmudict_data.h`) | `setDictionary` | 3.31 MB |
-| `duration_predictor` model (`default_dp_model_data.h`) | `setDurationPredictorModel` | 0.25 MB |
-| `decoder` (vocoder) model (`default_decoder_model_data.h`) | `setDecoderModel` | 0.43 MB |
-| **Total (simpler four)** | | **5.29 MB** |
+| **Total (simpler two)** | | **5.51 MB** |
 
-See `docs/architecture.md` for why the sizes above are what they are (quantization schemes,
-what got dropped and why).
+See `docs/architecture.md` for why the sizes above are what they are.
 
-A module with 8MB flash (e.g. N8R8) can't fit either combination compiled into flash
-alongside app code — pick which pieces to embed and which to load from storage (the two
-`.tflite` models are small and cheap to embed even on an 8MB module; the weights and
-especially the dictionary are the ones worth moving to external storage first). A
-16MB-flash module (e.g. N16R8) can embed everything, as `examples/tts_i2s_output/` does.
+An 8MB-flash module can't fit either combination compiled into flash alongside app code —
+pick which pieces to embed and which to load from storage (the dictionary is the one worth
+moving to external storage first). A 16MB-flash module can embed everything, as
+`examples/tts_i2s_output/` does.
 
 ## Model data
 
@@ -136,15 +137,12 @@ Each setter has two forms:
 
 ```cpp
 #include <TinyTTS.h>
-#include "TinyTTS/Data.h"   // default_weights, default_cmudict, default_duration_predictor_model, default_decoder_model
-using namespace tts_model_data;
+#include "TinyTTS/Data.h"   // default_weights, default_cmudict -- both in namespace tinytts
 
 // Borrowed -- a flash const array. The pointer must outlive the TinyTTS
 // object; nothing is copied.
 tts.setWeights(default_weights, default_weights_len);
 tts.setDictionary(default_cmudict, default_cmudict_len);
-tts.setDurationPredictorModel(default_duration_predictor_model, default_duration_predictor_model_len, /*max_phonemes=*/32);
-tts.setDecoderModel(default_decoder_model, default_decoder_model_len, /*chunk_frames=*/96);
 
 // Owned -- reads a File (LittleFS/FFat/SD/...) fully into a new PSRAM
 // buffer TinyTTS allocates and frees automatically (no manual cleanup).
@@ -153,23 +151,23 @@ tts.setWeights(f);
 
 // Optional: the neural G2P fallback, for words not in the dictionary.
 #include "TinyTTS/data/default_dictionary_model_data.h"  // not pulled in by TinyTTS/Data.h
-tts.setDictionaryModel(tts_model_data::default_dictionary_model, tts_model_data::default_dictionary_model_len);
+tts.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
 
 // Optional ALTERNATIVE to setDictionary(default_cmudict, ...) above -- use
 // one or the other, and only if you're also calling setDictionaryModel()
 // (see "Model data sizes" above for why).
 #include "TinyTTS/data/default_cmudict_slim_data.h"
-tts.setDictionary(tts_model_data::default_cmudict_slim, tts_model_data::default_cmudict_slim_len);
+tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
 ```
 
 `research/` has the Python tooling that produces this data — `export_weights_and_vectors.py`
-(hand-written-C++ stage weights + validation vectors), `export_cmudict.py` (dictionary, both
-the full and slimmed variants), `export_dictionary_model.py` (neural G2P fallback model),
-`compute_cmudict_exceptions.py` (determines which dictionary words the fallback model needs
-an exception for, i.e. the slimmed dictionary's contents), the `onnx2tf`/quantization
-pipeline for the two TFLite stages, and `export_headers.py` (which turns all of the above
-into the `.h` files under `src/TinyTTS/data/`) — see `docs/research.md`. Useful as a starting
-point for regenerating any of these with different settings.
+(every hand-written-C++ stage's weights + validation vectors), `export_cmudict.py`
+(dictionary, both the full and slimmed variants), `export_dictionary_model.py` (neural G2P
+fallback model), `compute_cmudict_exceptions.py` (determines which dictionary words the
+fallback model needs an exception for, i.e. the slimmed dictionary's contents), and
+`export_headers.py` (which turns all of the above into the `.h` files under
+`src/TinyTTS/data/`) — see `docs/research.md`. Useful as a starting point for regenerating
+any of these with different settings.
 
 ## Status / known limitations
 
@@ -182,6 +180,13 @@ point for regenerating any of these with different settings.
   mid-word** -- see `docs/text-input.md` for what input shapes are safe (individual words,
   full sentences, multiple sentences, and multi-call word-boundary splits all work; a
   multi-call split that cuts a word in half mispronounces it).
+- **This project tests and tunes for one board** (the `partitions.csv` shipped alongside
+  the example, the board settings above, etc.), even though none of the model code itself
+  is chip-specific. `DataBuffer`'s `File`-loading path uses ESP32's own PSRAM allocator
+  directly, `library.properties` scopes the library to the `esp32` architecture family, and
+  the model's multi-megabyte weight/dictionary data needs a module with real PSRAM -- so
+  this isn't a "runs on any microcontroller" library, just one with no inference-runtime
+  dependency within that family.
 
 ## Attribution
 

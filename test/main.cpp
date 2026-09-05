@@ -2,19 +2,14 @@
 // Validates against reference tensors dumped from the PyTorch model by
 // research/export_weights_and_vectors.py and research/export_cmudict.py.
 //
-// Exercises TinyTTSCore directly (the portable orchestration layer, with
-// stubbed duration_predictor/decoder callbacks) AND the top-level TinyTTS
-// facade in src/TinyTTS.h -- including its real TFLite Micro interpreters,
-// arenas, and allocation/deleter logic, run against the actual shipped
-// .tflite models (research/tflite_int8/.../*.tflite). On a non-ARDUINO
-// build TinyTTS.h's `tflite::` types come from the real TFLite Micro
-// source, fetched at CMake-configure time (see cmake/FetchTFLiteMicro.cmake
-// -- not tflm_esp32's ESP32-only precompiled binary), and its PSRAM
-// allocation goes through plain malloc/free instead of heap_caps_malloc --
-// see TinyTTS.h's class doc and tinyttsAlloc().
+// Exercises TinyTTSCore directly (the portable orchestration layer) AND the
+// top-level TinyTTS facade in src/TinyTTS.h. All four model stages
+// (text_encoder, flow, duration_predictor, decoder) are hand-written C++ --
+// no TFLite Micro or other inference-runtime dependency anywhere, so this
+// is a plain host build (no CMake fetch step needed for an inference
+// runtime).
 //
-// Build, via CMake (from the repo root; also supports -DTINYTTS_ASAN=ON;
-// first configure needs network access to fetch TFLite Micro):
+// Build, via CMake (from the repo root; also supports -DTINYTTS_ASAN=ON):
 //   cmake -S . -B build -DTINYTTS_BUILD_TESTS=ON
 //   cmake --build build && ./build/test/test_main
 #include <cmath>
@@ -25,7 +20,9 @@
 
 #include "TinyTTS.h"
 #include "TinyTTS/Data.h"
+#include "TinyTTS/Decoder.h"
 #include "TinyTTS/DictionaryModel.h"
+#include "TinyTTS/DurationPredictor.h"
 #include "TinyTTS/TinyTTSCore.h"
 #include "TinyTTS/data/default_cmudict_slim_data.h"
 #include "TinyTTS/data/default_dictionary_model_data.h"
@@ -49,7 +46,7 @@ static Mat channel_first_to_TC(const WeightStore::Entry& e) {
     int C = e.shape[1], T = e.shape[2];
     Mat m(T, C);
     for (int t = 0; t < T; t++)
-        for (int c = 0; c < C; c++) m.at(t, c) = e.data[(size_t)c * T + t];
+        for (int c = 0; c < C; c++) m.at(t, c) = e.at((size_t)c * T + t);
     return m;
 }
 
@@ -57,7 +54,7 @@ static Mat channel_first_1_to_row(const WeightStore::Entry& e) {
     // e.shape == [1, C, 1] -> Mat[1, C]
     int C = e.shape[1];
     Mat m(1, C);
-    for (int c = 0; c < C; c++) m.at(0, c) = e.data[c];
+    for (int c = 0; c < C; c++) m.at(0, c) = e.at(c);
     return m;
 }
 
@@ -114,11 +111,11 @@ static PhonemeEncoderOutput testPhonemeEncoder(ReferenceData& ref, int n_heads, 
     const WeightStore::Entry* phone_e = ref.vectors.get("phone_ids");
     int T = phone_e->shape[1];
     std::vector<int> phone_ids(T), tone_ids(T), language_ids(T);
-    for (int i = 0; i < T; i++) phone_ids[i] = (int)std::lround(phone_e->data[i]);
+    for (int i = 0; i < T; i++) phone_ids[i] = (int)std::lround(phone_e->at(i));
     const WeightStore::Entry* tone_e = ref.vectors.get("tone_ids");
-    for (int i = 0; i < T; i++) tone_ids[i] = (int)std::lround(tone_e->data[i]);
+    for (int i = 0; i < T; i++) tone_ids[i] = (int)std::lround(tone_e->at(i));
     const WeightStore::Entry* lang_e = ref.vectors.get("language_ids");
-    for (int i = 0; i < T; i++) language_ids[i] = (int)std::lround(lang_e->data[i]);
+    for (int i = 0; i < T; i++) language_ids[i] = (int)std::lround(lang_e->at(i));
 
     Mat g = channel_first_1_to_row(*ref.vectors.get("g"));
 
@@ -152,20 +149,80 @@ static void testFlow(ReferenceData& ref, int n_flows, int n_heads, int window_si
     check(cos_sim(z, z_ref) > 0.9999, "Flow.reverse matches reference");
 }
 
+// Hand-written Decoder forward pass against the PyTorch reference
+// (tiny_tts.models.synthesizer.WaveformDecoder, `net_g.dec`). Replaces the
+// TFLite Micro decoder model -- plain Conv1d/ConvTranspose1d/LeakyReLU, no
+// TFLM fixed-window constraint, run in one pass over the whole utterance.
+// Uses the reference flow output (z_ref) as input, so this test is isolated
+// to decoder correctness regardless of Flow's own (separately validated)
+// output.
+static void testDecoder(ReferenceData& ref) {
+    Decoder dec;
+    dec.begin(ref.weights);
+
+    Mat g = channel_first_1_to_row(*ref.vectors.get("g"));
+    Mat z_ref = channel_first_to_TC(*ref.vectors.get("z_ref"));
+    printf("\n=== Decoder ===\n");
+    auto audio = dec.forward(z_ref, g);
+
+    const WeightStore::Entry* audio_ref_e = ref.vectors.get("audio_ref");
+    int n = (int)audio.size();
+    double dot = 0, na = 0, nb = 0, max_diff = 0;
+    for (int i = 0; i < n; i++) {
+        double a = audio[i], b = audio_ref_e->at(i);
+        dot += a * b;
+        na += a * a;
+        nb += b * b;
+        max_diff = std::max(max_diff, std::fabs(a - b));
+    }
+    double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
+    printf("cos_sim audio:  %.6f  max_abs_diff=%.6f  n_samples=%d\n", cos, max_diff, n);
+    check((int)audio_ref_e->count == n, "Decoder.forward output length matches reference");
+    check(cos > 0.999, "Decoder.forward matches reference");
+}
+
+// Hand-written DurationPredictor forward pass against the PyTorch reference
+// (tiny_tts.models.synthesizer.DurationEstimator, `net_g.dp`). Replaces the
+// TFLite Micro duration_predictor model -- plain Conv1d/ChannelNorm/ReLU, no
+// TFLM fixed-window constraint.
+static std::vector<float> testDurationPredictor(ReferenceData& ref, const PhonemeEncoderOutput& enc_out) {
+    DurationPredictor dp;
+    dp.begin(ref.weights);
+
+    Mat g = channel_first_1_to_row(*ref.vectors.get("g"));
+    printf("\n=== DurationPredictor ===\n");
+    std::vector<float> logw = dp.forward(enc_out.x, g);
+
+    const WeightStore::Entry* logw_ref_e = ref.vectors.get("logw_ref");
+    int T = (int)logw.size();
+    double dot = 0, na = 0, nb = 0, max_diff = 0;
+    for (int i = 0; i < T; i++) {
+        double a = logw[i], b = logw_ref_e->at(i);
+        dot += a * b;
+        na += a * a;
+        nb += b * b;
+        max_diff = std::max(max_diff, std::fabs(a - b));
+    }
+    double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
+    printf("cos_sim logw:   %.6f  max_abs_diff=%.6f\n", cos, max_diff);
+    check(cos > 0.9999, "DurationPredictor.forward matches reference");
+    return logw;
+}
+
 // Duration -> frame-level expansion (the glue between duration_predictor
-// and flow), using the PhonemeEncoder output from testPhonemeEncoder().
-static void testAlignment(ReferenceData& ref, const PhonemeEncoderOutput& enc_out) {
+// and flow), using the PhonemeEncoder output from testPhonemeEncoder() and
+// the hand-written DurationPredictor's own logw (not the reference logw --
+// this exercises the real end-to-end hand-written path).
+static void testAlignment(ReferenceData& ref, const PhonemeEncoderOutput& enc_out, const std::vector<float>& logw) {
     int T = ref.vectors.get("phone_ids")->shape[1];
 
     printf("\n=== Alignment (duration -> frame expansion) ===\n");
-    const WeightStore::Entry* logw_e = ref.vectors.get("logw_ref");
-    std::vector<float> logw(logw_e->data.begin(), logw_e->data.end());
     std::vector<int> durations = alignment::durationsFromLogw(logw);
 
     const WeightStore::Entry* dur_ref_e = ref.vectors.get("durations_ref");
     bool durations_match = true;
     for (int i = 0; i < T; i++) {
-        int expected = (int)std::lround(dur_ref_e->data[i]);
+        int expected = (int)std::lround(dur_ref_e->at(i));
         if (durations[i] != expected) durations_match = false;
     }
     check(durations_match, "durations match reference");
@@ -247,73 +304,46 @@ static void testDictionaryModel() {
 }
 
 // Full orchestration (G2P -> encoder -> duration_predictor -> alignment ->
-// flow -> decoder) through TinyTTSCore directly, with stubbed
-// duration_predictor/decoder (those are independently validated in Python
-// already -- validate_int8.py/validate_tflite.py). Checks shapes flow
-// through every stage correctly, not stage-level numerics.
+// flow -> decoder) through TinyTTSCore directly -- every stage is the real
+// hand-written model, loaded from weights_buf by begin() (each independently
+// validated against the PyTorch reference above: testDurationPredictor(),
+// testDecoder(), etc.). Checks shapes/output are consistent end-to-end, not
+// stage-level numerics again.
 static void testTinyTTSCoreOrchestration(const std::vector<uint8_t>& weights_buf,
                                           const std::vector<uint8_t>& cmudict_buf) {
     printf("\n=== TinyTTSCore end-to-end orchestration ===\n");
     TinyTTSCore tts;
     bool began = tts.begin(weights_buf.data(), weights_buf.size(), cmudict_buf.data(), cmudict_buf.size());
     check(began, "TinyTTSCore.begin()");
+    check(tts.isReady(), "TinyTTSCore.isReady() after begin()");
 
-    Mat received_z, received_g;
-    tts.setDurationPredictor([](const Mat& x, const Mat& g_in) {
-        (void)g_in;
-        return std::vector<float>(x.rows(), std::log(3.0f));  // ~3 frames/phoneme
-    });
-    tts.setDecoder([&](const Mat& z, const Mat& g_in) {
-        received_z = z;
-        received_g = g_in;
-        return std::vector<float>(z.rows() * 512, 0.0f);  // dummy PCM, shape-only check
-    });
-    check(tts.isReady(), "TinyTTSCore.isReady() after wiring callbacks");
-
-    // synthesize() decodes in fixed-size chunks (default 96 frames, see
-    // TinyTTSCore::setDecoderChunkFrames) -- the stub decoder above is
-    // called once per chunk, so `received_z` ends up holding whichever
-    // chunk was decoded last (zero-padded to exactly 96 rows if it's a
-    // short final chunk).
     size_t total_audio_samples = 0;
     auto on_audio = [&](const float* samples, size_t count) {
         (void)samples;
         total_audio_samples += count;
     };
     SynthesisInfo info = tts.synthesize("Hello world!", on_audio, /*speaker_id=*/0);
-    printf("synthesize(\"Hello world!\"): y_len=%d, decoder received z rows=%d cols=%d, total audio samples=%zu\n",
-           info.y_len, received_z.rows(), received_z.cols(), total_audio_samples);
-    check(info.y_len > 0 && received_z.rows() == 96 && total_audio_samples > 0,
-          "full pipeline orchestration produces consistent shapes");
+    printf("synthesize(\"Hello world!\"): y_len=%d, total audio samples=%zu\n", info.y_len, total_audio_samples);
+    check(info.y_len > 0 && total_audio_samples > 0, "full pipeline orchestration produces consistent output");
 }
 
-// The actual public TinyTTS facade, driving its own real TFLite Micro
-// interpreters (not stubs) against the shipped quantized models -- on a
-// non-ARDUINO build these come from the fetched TFLM source (see
-// cmake/FetchTFLiteMicro.cmake), not tflm_esp32's ESP32-only precompiled
-// binary, so this is a genuine end-to-end run of the exact
-// interpreter-build/arena/deleter logic TinyTTS.h uses on real hardware,
-// not just its orchestration.
+// The actual public TinyTTS facade (not TinyTTSCore directly) -- checks the
+// Print-free portable begin()/speak()/end() lifecycle on top of the real
+// hand-written models, since testTinyTTSCoreOrchestration() above already
+// covers the orchestration itself.
 static void testTinyTTSFacadeRealModels(const std::vector<uint8_t>& weights_buf,
                                          const std::vector<uint8_t>& cmudict_buf) {
-    printf("\n=== TinyTTS facade (real TFLite Micro interpreters) ===\n");
-    std::vector<uint8_t> dp_model_buf =
-        read_file("../research/tflite_int8/duration_predictor/duration_predictor_full_integer_quant_with_int16_act.tflite");
-    std::vector<uint8_t> decoder_model_buf =
-        read_file("../research/tflite_int8/decoder/decoder_full_integer_quant_with_int16_act.tflite");
-
-    TinyTTS<> tinytts_obj;
+    printf("\n=== TinyTTS facade ===\n");
+    TinyTTS tinytts_obj;
     tinytts_obj.setWeights(weights_buf.data(), weights_buf.size());
     tinytts_obj.setDictionary(cmudict_buf.data(), cmudict_buf.size());
-    tinytts_obj.setDurationPredictorModel(dp_model_buf.data(), dp_model_buf.size(), /*max_phonemes=*/32);
-    tinytts_obj.setDecoderModel(decoder_model_buf.data(), decoder_model_buf.size(), /*chunk_frames=*/96);
 
     size_t total_audio_samples = 0;
     bool began = tinytts_obj.begin([&](const float* samples, size_t count) {
         (void)samples;
         total_audio_samples += count;
     });
-    check(began, "TinyTTS.begin() (builds real TFLite Micro interpreters)");
+    check(began, "TinyTTS.begin()");
     bool spoke = tinytts_obj.speak("Hello world!");
     check(spoke, "TinyTTS.speak() returns true after begin()");
     printf("TinyTTS.speak(\"Hello world!\"): total audio samples=%zu\n", total_audio_samples);
@@ -322,26 +352,18 @@ static void testTinyTTSFacadeRealModels(const std::vector<uint8_t>& weights_buf,
     check(!tinytts_obj.speak("should fail after end()"), "TinyTTS.speak() fails after end()");
 }
 
-// duration_predictor's TFLite model has a fixed 32-phoneme input window, but
-// TinyTTS::runDurationPredictor() slides overlapping windows across longer
-// text and keeps only each window's real-context "trusted middle" (see that
-// method's doc) instead of truncating -- this confirms that actually works
-// end-to-end, not just that it compiles: every phoneme in a text long
-// enough to need multiple windows should get a real duration, not just the
-// first 32.
-static void testDurationPredictorLongText(const std::vector<uint8_t>& weights_buf,
-                                           const std::vector<uint8_t>& cmudict_buf) {
-    printf("\n=== duration_predictor sliding window (text > 32 phonemes) ===\n");
-    std::vector<uint8_t> dp_model_buf =
-        read_file("../research/tflite_int8/duration_predictor/duration_predictor_full_integer_quant_with_int16_act.tflite");
-    std::vector<uint8_t> decoder_model_buf =
-        read_file("../research/tflite_int8/decoder/decoder_full_integer_quant_with_int16_act.tflite");
+// Every stage (duration_predictor and decoder included) is hand-written C++,
+// run in a single pass over the whole utterance -- no TFLite Micro
+// fixed-input-shape window to hit anywhere in the pipeline. This test uses a
+// long sentence (comfortably past the 32-phoneme window the old TFLM
+// duration_predictor used to have) to confirm there's no length limit left
+// to trip.
+static void testLongText(const std::vector<uint8_t>& weights_buf, const std::vector<uint8_t>& cmudict_buf) {
+    printf("\n=== Long text, single pass ===\n");
 
-    TinyTTS<> tts;
+    TinyTTS tts;
     tts.setWeights(weights_buf.data(), weights_buf.size());
     tts.setDictionary(cmudict_buf.data(), cmudict_buf.size());
-    tts.setDurationPredictorModel(dp_model_buf.data(), dp_model_buf.size(), /*max_phonemes=*/32);
-    tts.setDecoderModel(decoder_model_buf.data(), decoder_model_buf.size(), /*chunk_frames=*/96);
 
     bool began = tts.begin([](const float*, size_t) {});
     check(began, "TinyTTS.begin() for long-text test");
@@ -355,7 +377,7 @@ static void testDurationPredictorLongText(const std::vector<uint8_t>& weights_bu
     // check "no crash", it confirms every phoneme gets covered.
     G2POutput g2p_out = tts.core().g2p().process(long_text);
     size_t expected_phonemes = TextG2P::insertBlanks(g2p_out.phone_ids).size();
-    check(expected_phonemes > 32, "test sentence actually exceeds one duration_predictor window (32 phonemes)");
+    check(expected_phonemes > 32, "test sentence exceeds the old TFLM duration_predictor window size (32 phonemes)");
 
     size_t total_audio_samples = 0;
     SynthesisInfo info = tts.core().synthesize(long_text, [&](const float* samples, size_t count) {
@@ -365,7 +387,7 @@ static void testDurationPredictorLongText(const std::vector<uint8_t>& weights_bu
     printf("long text: %zu phonemes, y_len=%d, total audio samples=%zu\n", expected_phonemes, info.y_len,
            total_audio_samples);
     check(info.durations.size() == expected_phonemes,
-          "duration_predictor covers every phoneme in text longer than one window, not just the first 32");
+          "every phoneme in text longer than the old window size gets covered");
     check(total_audio_samples > 0, "long text still produces audio");
 }
 
@@ -382,15 +404,10 @@ static void testDurationPredictorLongText(const std::vector<uint8_t>& weights_bu
 // TinyTTS.h), so this still exercises the exact code path.
 static void testTinyTTSFacadeSketchData() {
     printf("\n=== Sketch-equivalent facade (examples/tts_i2s_output data) ===\n");
-    TinyTTS<> sketch_tts;
-    sketch_tts.setWeights(tts_model_data::default_weights, tts_model_data::default_weights_len);
-    sketch_tts.setDictionary(tts_model_data::default_cmudict_slim, tts_model_data::default_cmudict_slim_len);
-    sketch_tts.setDictionaryModel(tts_model_data::default_dictionary_model,
-                                   tts_model_data::default_dictionary_model_len);
-    sketch_tts.setDurationPredictorModel(tts_model_data::default_duration_predictor_model,
-                                          tts_model_data::default_duration_predictor_model_len, /*max_phonemes=*/32);
-    sketch_tts.setDecoderModel(tts_model_data::default_decoder_model, tts_model_data::default_decoder_model_len,
-                                /*chunk_frames=*/96);
+    TinyTTS sketch_tts;
+    sketch_tts.setWeights(default_weights, default_weights_len);
+    sketch_tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
+    sketch_tts.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
 
     size_t total_audio_samples = 0;
     bool began = sketch_tts.begin([&](const float* samples, size_t count) {
@@ -399,8 +416,7 @@ static void testTinyTTSFacadeSketchData() {
     });
     check(began,
           "sketch-equivalent TinyTTS.begin() "
-          "(default_weights/default_cmudict_slim/default_dictionary_model/"
-          "default_duration_predictor_model/default_decoder_model)");
+          "(default_weights/default_cmudict_slim/default_dictionary_model)");
     bool spoke = sketch_tts.speak("Hello world!");
     check(spoke, "sketch-equivalent TinyTTS.speak(\"Hello world!\")");
     printf("total audio samples=%zu\n", total_audio_samples);
@@ -413,12 +429,14 @@ int main() {
     ReferenceData ref = loadReferenceData();
     PhonemeEncoderOutput enc_out = testPhonemeEncoder(ref, n_heads, window_size);
     testFlow(ref, n_flows, n_heads, window_size);
-    testAlignment(ref, enc_out);
+    testDecoder(ref);
+    std::vector<float> logw = testDurationPredictor(ref, enc_out);
+    testAlignment(ref, enc_out, logw);
     testCmuDict(ref.cmudict_buf);
     testDictionaryModel();
     testTinyTTSCoreOrchestration(ref.weights_buf, ref.cmudict_buf);
     testTinyTTSFacadeRealModels(ref.weights_buf, ref.cmudict_buf);
-    testDurationPredictorLongText(ref.weights_buf, ref.cmudict_buf);
+    testLongText(ref.weights_buf, ref.cmudict_buf);
     testTinyTTSFacadeSketchData();
 
     printf("\n%d check(s) failed.\n", failures);

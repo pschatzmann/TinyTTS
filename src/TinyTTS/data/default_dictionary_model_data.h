@@ -20,7 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace tts_model_data {
+namespace tinytts {
 
 inline const unsigned char default_dictionary_model[] =
 "\000\001\000\000\035\000\000\000\112\000\000\000\112\000\000\000\356\325\355\077\355\260\061\277\171\030\213\076\072\254\302\277"
@@ -31049,4 +31049,4 @@ inline const unsigned char default_dictionary_model[] =
 ;
 inline const size_t default_dictionary_model_len = 992716;
 
-}  // namespace tts_model_data
+}  // namespace tinytts

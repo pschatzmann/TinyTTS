@@ -33,9 +33,9 @@ class Attention {
     const WeightStore::Entry* rel_k = ws.get(prefix + ".emb_rel_k");
     const WeightStore::Entry* rel_v = ws.get(prefix + ".emb_rel_v");
     emb_rel_k_ = Mat(rel_k->shape[1], rel_k->shape[2]);
-    emb_rel_k_.data() = rel_k->data;
+    for (size_t i = 0; i < rel_k->count; i++) emb_rel_k_.data()[i] = rel_k->at(i);
     emb_rel_v_ = Mat(rel_v->shape[1], rel_v->shape[2]);
-    emb_rel_v_.data() = rel_v->data;
+    for (size_t i = 0; i < rel_v->count; i++) emb_rel_v_.data()[i] = rel_v->at(i);
 
     n_heads_ = n_heads;
     k_channels_ = conv_q_.rows() / n_heads;

@@ -11,17 +11,20 @@
  * This uses the slimmed CMU dictionary (default_cmudict_slim) plus the
  * neural G2P fallback model (default_dictionary_model) instead of the full
  * dictionary (default_cmudict, the one TinyTTS/Data.h's umbrella include
- * pulls in) -- together they're actually *smaller* (~2.0MB vs. ~3.3MB) and
- * give better pronunciation for words the dictionary doesn't cover, now
- * that the model's own GRU weight matrices are INT8-quantized. See
- * README.md's "Model data sizes" for the full breakdown and why this
+ * pulls in) -- together they're actually *smaller* than the full dictionary
+ * alone and give better pronunciation for words the dictionary doesn't
+ * cover, now that the model's own GRU weight matrices are INT8-quantized.
+ * See README.md's "Model data sizes" for the full breakdown and why this
  * wasn't always the better option (it wasn't, before that quantization).
  * Since these two aren't part of TinyTTS/Data.h's umbrella (the slim
  * dictionary REQUIRES the model to also be wired in, so bundling either
- * with the always-safe default four wouldn't make sense), each data header
- * is included individually below instead of via TinyTTS/Data.h.
+ * with the always-safe default two wouldn't make sense), each data header
+ * is included individually below instead of via TinyTTS/Data.h. There's no
+ * separate duration_predictor or decoder data header at all -- every model
+ * stage is hand-written C++ (DurationPredictor.h/Decoder.h), all their
+ * weights are part of default_weights.
  *
- * ~4.0MB of embedded data is larger than any predefined board partition
+ * This much embedded data is larger than any predefined board partition
  * scheme offers as an app partition, hence the custom partitions.csv
  * alongside this sketch. See README.md's Requirements section for the
  * per-file sizes and a table of which ESP32-S3 module flash/PSRAM sizes
@@ -38,21 +41,17 @@
 #include "TinyTTS/data/default_weights_data.h"
 #include "TinyTTS/data/default_cmudict_slim_data.h"
 #include "TinyTTS/data/default_dictionary_model_data.h"
-#include "TinyTTS/data/default_dp_model_data.h"
-#include "TinyTTS/data/default_decoder_model_data.h"
 
 #include "AudioTools.h"
 #include "AudioTools/AudioLibs/I2SCodecStream.h"
 
-using namespace tts_model_data;
-
-TinyTTS<> tts;
 // I2SStream alone drives only the raw I2S clock/data lines -- boards with an
 // actual audio codec chip (like this one: ES8311 codec + FM8002E speaker
 // amp) need the codec's own I2C setup (mute/unmute, gain, power) done too,
 // or there's no sound. I2SCodecStream does both via the board profile (see
 // https://github.com/pschatzmann/arduino-audio-driver).
 I2SCodecStream i2s_out(ESP32S3HosyondDisplay);
+TinyTTS tts(i2s_out);
 
 void setup() {
   Serial.begin(115200);
@@ -72,19 +71,21 @@ void setup() {
   tts.setWeights(default_weights, default_weights_len);
   tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
   tts.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
-  tts.setDurationPredictorModel(default_duration_predictor_model, default_duration_predictor_model_len,
-                                 /*max_phonemes=*/32);
-  tts.setDecoderModel(default_decoder_model, default_decoder_model_len, /*chunk_frames=*/96);
-  if (!tts.begin(i2s_out)) {
+  if (!tts.begin()) {
     Serial.println("TinyTTS.begin() failed -- did you call all setters above?");
     while (true) {}
   }
 
+  Serial.printf("PSRAM after begin(): %u bytes free of %u\n", ESP.getFreePsram(), ESP.getPsramSize());
   Serial.println("Ready.");
-  tts.speak("Hello world!");
+  uint32_t t0 = millis();
+  bool ok = tts.speak("Hello world!");
+  Serial.printf("speak() returned %d after %lu ms, PSRAM free: %u\n", ok, millis() - t0, ESP.getFreePsram());
 }
 
 void loop() {
-  tts.speak("Hello world!");
+  uint32_t t0 = millis();
+  bool ok = tts.speak("Hello world!");
+  Serial.printf("speak() returned %d after %lu ms, PSRAM free: %u\n", ok, millis() - t0, ESP.getFreePsram());
   delay(5000);
 }

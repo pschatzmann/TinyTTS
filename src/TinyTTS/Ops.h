@@ -33,23 +33,53 @@ inline Mat linear(const Mat& x, const Mat& w, const std::vector<float>& bias) {
   return y;
 }
 
-/// General Conv1d, weight shape [Cout, Cin, K], "same" padding (pad=(K-1)/2), stride 1.
-inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<float>& bias) {
+/// General Conv1d, weight shape [Cout, Cin, K], "same" padding
+/// (pad=dilation*(K-1)/2, K odd), stride 1.
+inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<float>& bias, int dilation = 1) {
   int cout = w.shape[0], cin = w.shape[1], k = w.shape[2];
-  int pad = (k - 1) / 2;
+  int pad = dilation * (k - 1) / 2;
   Mat y(x.rows(), cout);
   for (int t = 0; t < x.rows(); t++) {
     float* yr = y.row(t);
     for (int co = 0; co < cout; co++) {
       float acc = bias.empty() ? 0.0f : bias[co];
       for (int kk = 0; kk < k; kk++) {
-        int ti = t + kk - pad;
+        int ti = t + kk * dilation - pad;
         if (ti < 0 || ti >= x.rows()) continue;
         const float* xr = x.row(ti);
-        const float* wbase = w.data.data() + ((size_t)co * cin) * k + kk;
-        for (int ci = 0; ci < cin; ci++) acc += xr[ci] * wbase[(size_t)ci * k];
+        size_t wbase = ((size_t)co * cin) * k + kk;
+        for (int ci = 0; ci < cin; ci++) acc += xr[ci] * w.at(wbase + (size_t)ci * k);
       }
       yr[co] = acc;
+    }
+  }
+  return y;
+}
+
+/// ConvTranspose1d, weight shape [Cin, Cout, K] (PyTorch's ConvTranspose1d
+/// layout -- note the axis order differs from conv1d()'s [Cout, Cin, K]),
+/// stride/padding as in PyTorch (dilation=1, output_padding=0). Output
+/// length = (T_in-1)*stride - 2*padding + K.
+inline Mat convTranspose1d(const Mat& x, const WeightStore::Entry& w, const std::vector<float>& bias, int stride,
+                            int padding) {
+  int cin = w.shape[0], cout = w.shape[1], k = w.shape[2];
+  int t_out_len = (x.rows() - 1) * stride - 2 * padding + k;
+  Mat y(t_out_len, cout);
+  for (int co = 0; co < cout; co++) {
+    float b = bias.empty() ? 0.0f : bias[co];
+    for (int t = 0; t < t_out_len; t++) y.at(t, co) = b;
+  }
+  for (int ti = 0; ti < x.rows(); ti++) {
+    const float* xr = x.row(ti);
+    for (int kk = 0; kk < k; kk++) {
+      int t_out = ti * stride - padding + kk;
+      if (t_out < 0 || t_out >= t_out_len) continue;
+      float* yr = y.row(t_out);
+      for (int ci = 0; ci < cin; ci++) {
+        float xv = xr[ci];
+        size_t wbase = ((size_t)ci * cout) * k + kk;
+        for (int co = 0; co < cout; co++) yr[co] += xv * w.at(wbase + (size_t)co * k);
+      }
     }
   }
   return y;
@@ -79,6 +109,11 @@ inline void channelLayerNormInplace(Mat& x, const std::vector<float>& gamma, con
 
 inline void reluInplace(Mat& x) {
   for (auto& v : x.data()) v = std::max(0.0f, v);
+}
+
+inline void leakyReluInplace(Mat& x, float slope = 0.1f) {
+  for (auto& v : x.data())
+    if (v < 0.0f) v *= slope;
 }
 
 inline void addInplace(Mat& a, const Mat& b) {

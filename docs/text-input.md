@@ -9,17 +9,19 @@ one real constraint on how you split it up.
   limit. `TextG2P::process()` just tokenizes on whitespace and handles punctuation (`.`,
   `,`, `!`, `?`, `-`, `'`) as it goes -- there's nothing sentence-specific about it, it's one
   continuous token stream regardless of how many sentences are in it.
-- There used to be a 32-phoneme ceiling (`duration_predictor`'s fixed TFLite Micro input
-  window), but `TinyTTS::runDurationPredictor()` now slides overlapping windows across
-  arbitrarily long text and keeps only each window's real-context "trusted middle" (see
-  that method's doc in `src/TinyTTS.h`) -- so a single `speak()` call handles text of any
-  length correctly, not just the first 32 phonemes of it.
+- Every model stage (`duration_predictor`/`Decoder.h` included) is hand-written C++, run in
+  a single pass over the whole utterance -- no TFLite Micro fixed-input-shape window to hit
+  anywhere, so a single `speak()` call handles text of any length with no phoneme-count
+  ceiling at all. The tradeoff: `speak()` hands its callback the *whole* utterance's audio
+  once synthesis finishes -- there's no partial audio streamed out mid-computation within
+  one call, so a very long single `speak()` call means more time before any sound starts.
 
 ## Splitting text across multiple `speak()` calls
 
 If you have a long stream of text arriving incrementally (e.g. from a network connection)
-and want to start synthesizing before it's all in, you can call `speak()` more than once --
-but there's exactly one rule:
+and want to start hearing audio before it's all in -- the only way to get audio sooner than
+"wait for one `speak()` call to fully finish" -- you can call `speak()` more than once, on
+each piece of text as it arrives. There's exactly one rule:
 
 **Split on whitespace/word boundaries. Never split in the middle of a word.**
 

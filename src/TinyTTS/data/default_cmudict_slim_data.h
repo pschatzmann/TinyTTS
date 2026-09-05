@@ -19,7 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace tts_model_data {
+namespace tinytts {
 
 inline const unsigned char default_cmudict_slim[] =
 "\265\220\000\000\000\000\000\000\022\000\000\000\037\000\000\000\054\000\000\000\066\000\000\000\074\000\000\000\077\000\000\000"
@@ -34970,4 +34970,4 @@ inline const unsigned char default_cmudict_slim[] =
 ;
 inline const size_t default_cmudict_slim_len = 1118218;
 
-}  // namespace tts_model_data
+}  // namespace tinytts

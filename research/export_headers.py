@@ -1,7 +1,6 @@
 """
 M2: converts the binary data files (weights.bin, cmudict.bin,
-dictionary_model.bin, and the chosen quantized .tflite exports) into C++
-headers for src/TinyTTS/data/.
+dictionary_model.bin) into C++ headers for src/TinyTTS/data/.
 
 TinyTTS.h itself does not embed or auto-include this data -- it's shipped as
 example/reference model data for convenience (include "TinyTTS/Data.h" and
@@ -32,7 +31,7 @@ def to_header(path, out_path, varname, comment):
     with open(out_path, "w") as f:
         f.write(comment)
         f.write("#pragma once\n#include <cstddef>\n#include <cstdint>\n\n")
-        f.write("namespace tts_model_data {\n\n")
+        f.write("namespace tinytts {\n\n")
         f.write(f"inline const unsigned char {varname}[] =\n")
         line_bytes = 32
         for i in range(0, len(data), line_bytes):
@@ -40,17 +39,21 @@ def to_header(path, out_path, varname, comment):
             f.write('"' + "".join(f"\\{b:03o}" for b in chunk) + '"\n')
         f.write(";\n")
         f.write(f"inline const size_t {varname}_len = {len(data)};\n\n")
-        f.write("}  // namespace tts_model_data\n")
+        f.write("}  // namespace tinytts\n")
     print(f"{out_path}: {len(data)} bytes -> {os.path.getsize(out_path)} byte header")
 
 
-WEIGHTS_COMMENT = """// default_weights: the hand-written text_encoder (PhonemeEncoder) + flow
-// attention weights, fp32, extracted from tronghieuit/tiny-tts's 1.618M-param
-// checkpoint (backtracking/tiny-tts on the HuggingFace Hub) by
-// research/export_weights_and_vectors.py. Named-tensor binary format, see
-// WeightStore.h for the parser. Consumed by PhonemeEncoder and Flow
-// directly -- NOT run through TFLite Micro, see the project plan for why
-// (onnx2tf cannot convert this windowed relative-position attention module).
+WEIGHTS_COMMENT = """// default_weights: every hand-written C++ stage's weights -- text_encoder
+// (PhonemeEncoder), flow, duration_predictor, and decoder -- extracted from
+// tronghieuit/tiny-tts's 1.618M-param checkpoint (backtracking/tiny-tts on
+// the HuggingFace Hub) by research/export_weights_and_vectors.py.
+// Named-tensor binary format, see WeightStore.h for the parser. NOT run
+// through TFLite Micro or any other inference runtime -- text_encoder/flow
+// use a windowed relative-position attention module onnx2tf can't convert at
+// all; duration_predictor/decoder convert to TFLite cleanly on their own but
+// are hand-written anyway, reusing the same primitives, since doing so
+// removes TFLite Micro's fixed-input-shape limitation for those stages
+// entirely (see docs/architecture.md).
 // Pass to tts.setWeights(default_weights, default_weights_len) before
 // tts.begin().
 
@@ -89,21 +92,6 @@ CMUDICT_SLIM_COMMENT = """// default_cmudict_slim: the same CMU Pronouncing Dict
 
 """
 
-DP_COMMENT = """// default_duration_predictor_model: duration_predictor.tflite, quantized to
-// INT8 weights with INT16 activations, fixed 32-phoneme input window
-// (TFLite Micro has no input-resize API, so this graph -- like the decoder
-// below -- must be a fixed shape). Chosen over full INT8 (int8 activations)
-// because it's near-lossless (cosine similarity 0.9999 vs. the float32
-// reference) at negligible extra size cost -- see the project plan's
-// quantization study. Runs through TFLite Micro (tflm_esp32), not
-// hand-written C++, since this graph converts cleanly from ONNX (it has no
-// attention).
-// Pass to tts.setDurationPredictorModel(default_duration_predictor_model,
-// default_duration_predictor_model_len, 32) before tts.begin() -- the 32
-// must match the fixed phoneme window this model was exported for.
-
-"""
-
 DICTIONARY_MODEL_COMMENT = """// default_dictionary_model: the neural G2P fallback (see DictionaryModel.h)
 // for words not in default_cmudict -- a from-scratch C++ port of the
 // reference project's own g2p_predict.js (itself a port of the Python
@@ -123,37 +111,6 @@ DICTIONARY_MODEL_COMMENT = """// default_dictionary_model: the neural G2P fallba
 // default_dictionary_model_len) before tts.begin() if you want it.
 
 """
-
-DECODER_COMMENT = """// default_decoder_model: decoder.tflite (the HiFi-GAN-style vocoder stage),
-// full INT8 quantization (int8 weights, INT16 activations -- same scheme as
-// duration_predictor), fixed 96-frame (~1.1s of audio at 44.1kHz) input
-// window. This is the ONLY variant of the 4 studied that actually runs on
-// TFLite Micro, confirmed with a host-side (x86, ASan) TFLM build of the
-// real interpreter/allocator code, not just compiled-for-ESP32 and assumed:
-//   - float16 weights: DEQUANTIZE kernel only accepts int8/int16/uint8
-//     input, not float16 -- AllocateTensors() fails outright.
-//   - dynamic-range (weights-only int8, float32 activations): TFLite Micro
-//     does not support "hybrid" models at all ("Hybrid models are not
-//     supported on TFLite Micro", from CONV_2D's own prepare step) --
-//     AllocateTensors() fails outright.
-//   - full INT8 with INT8 activations: loads fine, but measurably degrades
-//     audio quality (12.4dB SNR, audible noise) vs. this variant's 22.6dB --
-//     see the project plan's quantization study.
-// (On real ESP32-S3 hardware, feeding either of the first two unsupported
-// variants to tflm_esp32 didn't just fail cleanly -- AllocateTensors()'s
-// failure path left the heap corrupted, surfacing later as a confusing TLSF
-// assert on an unrelated allocation. That corruption is a tflm_esp32/TFLM
-// robustness gap, not something callers can work around -- avoid it by
-// simply not feeding it a hybrid or float16 model, as done here.)
-// Also needs a decoder tensor arena of at least ~1.5MB (see
-// TinyTTS::decoder_arena_size_ / setArenaSizes()) -- confirmed via the same
-// host-side build.
-// Pass to tts.setDecoderModel(default_decoder_model,
-// default_decoder_model_len, 96) before tts.begin() -- the 96 must match
-// the fixed frame window this model was exported for.
-
-"""
-
 
 def main():
     out_dir = os.path.join(BASE, "src", "TinyTTS", "data")
@@ -182,26 +139,6 @@ def main():
     else:
         print(f"skipping default_cmudict_slim_data.h -- {slim_path} not found "
               "(run export_cmudict.py after compute_cmudict_exceptions.py)")
-    to_header(
-        os.path.join(
-            BASE,
-            "research",
-            "tflite_int8",
-            "duration_predictor",
-            "duration_predictor_full_integer_quant_with_int16_act.tflite",
-        ),
-        os.path.join(out_dir, "default_dp_model_data.h"),
-        "default_duration_predictor_model",
-        DP_COMMENT,
-    )
-    to_header(
-        os.path.join(
-            BASE, "research", "tflite_int8", "decoder", "decoder_full_integer_quant_with_int16_act.tflite"
-        ),
-        os.path.join(out_dir, "default_decoder_model_data.h"),
-        "default_decoder_model",
-        DECODER_COMMENT,
-    )
     to_header(
         os.path.join(BASE, "research", "dictionary_model.bin"),
         os.path.join(out_dir, "default_dictionary_model_data.h"),

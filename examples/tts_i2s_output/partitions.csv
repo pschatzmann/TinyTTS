@@ -1,18 +1,18 @@
 # Name,   Type, SubType, Offset,  Size,     Flags
 #
-# TinyTTS embeds ~4.0MB of model weights/dictionary/G2P model as flash const
+# TinyTTS embeds ~4.2MB of model weights/dictionary/G2P model as flash const
 # arrays (see default_weights_data.h/default_cmudict_slim_data.h/
-# default_dictionary_model_data.h/default_dp_model_data.h/
-# default_decoder_model_data.h) -- no predefined esp32 core partition scheme
-# offers an app partition that big, hence this custom table.
+# default_dictionary_model_data.h) -- no predefined esp32 core partition
+# scheme offers an app partition that big, hence this custom table.
 #
 # IMPORTANT: "ESP32-S3" alone does not tell you how much flash/PSRAM a board
 # has -- the S3 die itself has neither; both are external and depend on the
 # specific module (e.g. an N8R8 module has 8MB flash/8MB PSRAM, an N4R2 has
 # 4MB flash/2MB PSRAM). This 10MB `factory` partition needs >=16MB of flash;
-# an 8MB-flash module can likely fit it (~4.0MB embedded data plus app code
-# -- TFLM + this library + Arduino core -- realistically needs ~6MB for
-# `factory`, well under 8MB), but this partition table's 10MB size itself
+# an 8MB-flash module can likely fit it (~4.2MB embedded data plus app code
+# -- this library (no external inference-runtime dependency) + Arduino core
+# + arduino-audio-tools -- realistically needs ~6MB for `factory`, well under
+# 8MB), but this partition table's 10MB size itself
 # still needs >=16MB flash to leave room for nvs/phy_init/bootloader --
 # shrink `factory`'s size below if you want to fit an 8MB-flash module with
 # this same table. If your board has less flash than that, don't use the

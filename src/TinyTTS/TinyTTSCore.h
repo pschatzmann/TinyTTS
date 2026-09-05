@@ -6,8 +6,14 @@
 #include <string>
 #include <vector>
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
+
 #include "TinyTTS/Alignment.h"
 #include "TinyTTS/CmuDict.h"
+#include "TinyTTS/Decoder.h"
+#include "TinyTTS/DurationPredictor.h"
 #include "TinyTTS/Flow.h"
 #include "TinyTTS/DictionaryModel.h"
 #include "TinyTTS/Mat.h"
@@ -18,10 +24,6 @@
 namespace tinytts {
 
 /// Metadata about a completed synthesize() call -- NOT the audio itself.
-/// Audio is streamed out via the AudioChunkFn callback as each decoder chunk
-/// is ready, never buffered as a whole utterance (an utterance's audio can be
-/// large; there's no reason to hold all of it in RAM when the caller is
-/// just going to stream it to I2S/a file/etc. as it arrives).
 struct SynthesisInfo {
   int y_len = 0;  // total vocoder frames synthesized
   std::vector<int> durations;
@@ -30,41 +32,37 @@ struct SynthesisInfo {
 /**
  * @brief Public API for TinyTTS: text -> speech, on an ESP32-S3.
  *
- * Two of the four model stages (text_encoder, flow) run as hand-written C++
- * here (Attention/TransformerBlock/PhonemeEncoder/Flow) -- the ONNX->TFLite
- * conversion path (onnx2tf) cannot handle their windowed relative-position
- * attention module, so they're implemented directly instead. The other two
- * stages (duration_predictor, decoder/vocoder) convert to TFLite cleanly and
- * run through TFLite Micro; this class does not link TFLM itself, it takes
- * those two stages as callbacks (`setDurationPredictor`/`setDecoder`) so
- * TinyTTS.h has no hard dependency on any particular TFLM binding -- the
- * sketch wires up the actual `tflm_esp32` interpreters and passes them in.
+ * All four model stages run as hand-written C++ here:
+ *   - text_encoder/flow (PhonemeEncoder/Flow): attention-bearing, and the
+ *     ONNX->TFLite conversion path (onnx2tf) can't handle their windowed
+ *     relative-position attention module at all.
+ *   - duration_predictor (DurationPredictor): plain Conv1d/ChannelNorm/ReLU,
+ *     converts to TFLite cleanly on its own, but is hand-written anyway --
+ *     reusing the same primitives (Ops.h) once the attention path already
+ *     needed them -- because doing so removes TFLite Micro's
+ *     fixed-input-shape limitation for this stage entirely.
+ *   - decoder (Decoder): the HiFi-GAN-style vocoder, likewise plain
+ *     Conv1d/ConvTranspose1d/LeakyReLU (no attention) and hand-written for
+ *     the same reason.
  *
- * The decoder runs in fixed-size frame windows (`decoderChunkFrames`, see
- * setDecoderChunkFrames()), not one call over the whole utterance: TFLite
- * Micro's MicroInterpreter has no input-resize API, so a TFLM-backed decoder
- * is necessarily a fixed shape. This also naturally gives streaming
- * synthesis -- audio for the first chunk is available (and can start
- * playing) well before the whole utterance has been generated.
+ * There is no TFLite Micro (or any other inference-runtime) dependency
+ * anywhere in this class -- see docs/architecture.md for the full mechanical
+ * breakdown of each stage and why it ended up this way.
+ *
+ * Because none of the four stages has a TFLite Micro fixed-input-shape
+ * constraint, synthesize() runs the whole utterance through in a single
+ * pass, then hands the complete PCM buffer to `on_audio` once -- there is no
+ * chunk-by-chunk streaming-while-decoding here (that was a side effect of
+ * TFLM's fixed-shape decoder needing a window in the first place, not an
+ * independent design goal).
  *
  * @author Phil Schatzmann
  * @copyright Apache-2.0
  */
 class TinyTTSCore {
  public:
-  /// x: [T_x, hidden] phoneme encoder hidden state, g: [1, gin_channels]
-  /// speaker embedding -> logw: [T_x] (one log-duration value per phoneme).
-  using DurationPredictorFn = std::function<std::vector<float>(const Mat& x, const Mat& g)>;
-
-  /// z: [decoderChunkFrames, inter_channels] (always exactly this many rows
-  /// -- zero-padded for a short final chunk, see synthesize()), g: [1,
-  /// gin_channels] speaker embedding -> interleaved PCM samples for that
-  /// chunk.
-  using DecoderFn = std::function<std::vector<float>(const Mat& z, const Mat& g)>;
-
-  /// Called once per decoder chunk, with that chunk's PCM samples, as soon
-  /// as they're ready -- e.g. write them straight to an I2SStream. Never
-  /// called with a whole-utterance buffer.
+  /// Called once, with the whole utterance's PCM samples, when synthesis
+  /// finishes -- e.g. write them straight to an I2SStream.
   using AudioChunkFn = std::function<void(const float* samples, size_t count)>;
 
   /// Loads model weights and the CMU dictionary from in-memory buffers
@@ -83,6 +81,8 @@ class TinyTTSCore {
     if (!cmudict_.begin(cmudict_buf, cmudict_len)) return false;
     encoder_.begin(weights_, n_heads, window_size);
     flow_.begin(weights_, n_flows, n_heads, window_size);
+    duration_predictor_.begin(weights_);
+    decoder_.begin(weights_);
 
     const DictionaryModel* dictionary_model_ptr = nullptr;
     if (dictionary_model_buf != nullptr && dictionary_model_len > 0) {
@@ -98,27 +98,15 @@ class TinyTTSCore {
     return true;
   }
 
-  void setDurationPredictor(DurationPredictorFn fn) { duration_predictor_ = std::move(fn); }
-  void setDecoder(DecoderFn fn) { decoder_ = std::move(fn); }
-
-  /// Must match the fixed frame count the decoder TFLite model was built
-  /// for (e.g. 96 -- see research/'s -ois export). Default 96 matches this
-  /// project's own reference export; set explicitly if yours differs.
-  void setDecoderChunkFrames(int frames) { decoder_chunk_frames_ = frames; }
-
-  /// Samples per vocoder frame (HOP_LENGTH in tiny_tts.utils.config) --
-  /// needed to trim the zero-padded tail of a short final chunk down to its
-  /// real sample count.
-  void setHopLength(int hop_length) { hop_length_ = hop_length; }
-
-  bool isReady() const { return started_ && duration_predictor_ && decoder_; }
+  bool isReady() const { return started_; }
 
   /// Synthesizes `text` for speaker `speaker_id` (index into the model's
-  /// speaker embedding table; 0 for single-speaker models), streaming audio
-  /// out through `on_audio` one decoder chunk at a time. noise_scale
-  /// controls the flow's stochasticity (0 = deterministic), length_scale
-  /// stretches/compresses durations (1 = normal speed), rng_seed seeds the
-  /// noise sampling (same seed -> same output, for reproducible testing).
+  /// speaker embedding table; 0 for single-speaker models), handing the
+  /// whole utterance's PCM to `on_audio` once synthesis completes.
+  /// noise_scale controls the flow's stochasticity (0 = deterministic),
+  /// length_scale stretches/compresses durations (1 = normal speed),
+  /// rng_seed seeds the noise sampling (same seed -> same output, for
+  /// reproducible testing).
   SynthesisInfo synthesize(const std::string& text, const AudioChunkFn& on_audio, int speaker_id = 0,
                             float noise_scale = 0.667f, float length_scale = 1.0f, uint32_t rng_seed = 0) const {
     SynthesisInfo info;
@@ -137,11 +125,21 @@ class TinyTTSCore {
     Mat g(1, gin_channels_);
     for (int c = 0; c < gin_channels_; c++) g.at(0, c) = emb_g_.at(speaker_id, c);
 
+#ifdef ARDUINO
+    uint32_t t_enc0 = millis();
+#endif
     PhonemeEncoderOutput enc_out = encoder_.forward(phone_ids, tone_ids, language_ids, g);
+#ifdef ARDUINO
+    Serial.printf("[TinyTTS] encoder: %lu ms\n", millis() - t_enc0);
+    uint32_t t_dp0 = millis();
+#endif
 
-    std::vector<float> logw = duration_predictor_(enc_out.x, g);
+    std::vector<float> logw = duration_predictor_.forward(enc_out.x, g);
     std::vector<int> durations = alignment::durationsFromLogw(logw, length_scale);
     int t_y = alignment::totalDuration(durations);
+#ifdef ARDUINO
+    Serial.printf("[TinyTTS] duration_predictor: %lu ms, t_y=%d\n", millis() - t_dp0, t_y);
+#endif
 
     Mat m_p_exp = alignment::expandByDuration(enc_out.m_p, durations, t_y);
     Mat logs_p_exp = alignment::expandByDuration(enc_out.logs_p, durations, t_y);
@@ -153,21 +151,19 @@ class TinyTTSCore {
       for (int c = 0; c < m_p_exp.cols(); c++)
         z_p.at(t, c) = m_p_exp.at(t, c) + normal(rng) * std::exp(logs_p_exp.at(t, c)) * noise_scale;
 
+#ifdef ARDUINO
+    uint32_t t_flow0 = millis();
+#endif
     Mat z = flow_.reverse(z_p, g);
-
-    // Decode in fixed-size windows, streaming each chunk's audio out as
-    // soon as it's ready (see class doc for why: TFLM has no resize API).
-    int chunk_frames = decoder_chunk_frames_;
-    for (int start = 0; start < t_y; start += chunk_frames) {
-      int valid = std::min(chunk_frames, t_y - start);
-      Mat z_chunk(chunk_frames, z.cols(), 0.0f);  // zero-padded if this is a short final chunk
-      for (int t = 0; t < valid; t++) std::copy(z.row(start + t), z.row(start + t) + z.cols(), z_chunk.row(t));
-
-      std::vector<float> audio = decoder_(z_chunk, g);
-      size_t valid_samples = (size_t)valid * hop_length_;
-      if (valid_samples > audio.size()) valid_samples = audio.size();  // defensive, shouldn't happen
-      if (on_audio) on_audio(audio.data(), valid_samples);
-    }
+#ifdef ARDUINO
+    Serial.printf("[TinyTTS] flow: %lu ms\n", millis() - t_flow0);
+    uint32_t t_dec0 = millis();
+#endif
+    auto audio = decoder_.forward(z, g);
+#ifdef ARDUINO
+    Serial.printf("[TinyTTS] decoder: %lu ms, samples=%u\n", millis() - t_dec0, (unsigned)audio.size());
+#endif
+    if (on_audio) on_audio(audio.data(), audio.size());
 
     info.durations = std::move(durations);
     info.y_len = t_y;
@@ -177,6 +173,8 @@ class TinyTTSCore {
   // ---- component access, for testing / advanced use ----
   const PhonemeEncoder& encoder() const { return encoder_; }
   const Flow& flow() const { return flow_; }
+  const DurationPredictor& durationPredictor() const { return duration_predictor_; }
+  const Decoder& decoder() const { return decoder_; }
   const TextG2P& g2p() const { return g2p_; }
   const WeightStore& weights() const { return weights_; }
 
@@ -186,14 +184,12 @@ class TinyTTSCore {
   DictionaryModel dictionary_model_;
   PhonemeEncoder encoder_;
   Flow flow_;
+  DurationPredictor duration_predictor_;
+  Decoder decoder_;
   TextG2P g2p_;
   Mat emb_g_;
   int gin_channels_ = 0;
-  int decoder_chunk_frames_ = 96;
-  int hop_length_ = 512;
   bool started_ = false;
-  DurationPredictorFn duration_predictor_;
-  DecoderFn decoder_;
 };
 
 }  // namespace tinytts
