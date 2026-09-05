@@ -11,7 +11,7 @@ matters if you're modifying it, debugging it, or curious.
 | `text_encoder` (phoneme/tone/language embeddings + transformer) | hand-written C++ (`PhonemeEncoder`, `Attention`, `TransformerBlock`) | attention-bearing, `onnx2tf` can't convert it |
 | `flow` (normalizing flow, prior → posterior latent) | hand-written C++ (`Flow`) | same reason — its coupling layers use the same attention module |
 | `duration_predictor` | hand-written C++ (`DurationPredictor`) | plain Conv1d/ChannelNorm/ReLU -- converts cleanly, but hand-written anyway to drop TFLite Micro's fixed-input-shape limitation entirely |
-| `decoder` (HiFi-GAN-style vocoder) | hand-written C++ (`Decoder`) | plain Conv1d/ConvTranspose1d/LeakyReLU -- same reasoning as `duration_predictor` |
+| `decoder` (HiFi-GAN-style vocoder) | hand-written C++ (`Vocoder`) | plain Conv1d/ConvTranspose1d/LeakyReLU -- same reasoning as `duration_predictor` |
 
 All four stages are hand-written C++ -- there is no TFLite Micro, or any other
 inference-runtime, dependency anywhere in this library.
@@ -40,6 +40,43 @@ The hand-written C++ was verified bit-exact (cosine similarity 1.000000 for ever
 being trusted; see `research/` for the validation scripts and `test/` for the ongoing
 regression harness.
 
+## Data flow
+
+What actually happens between `tts.speak("Hello world!")` and the samples that reach the
+speaker, with the real tensor shapes and parameter values this project's own test vectors
+produce. Solid arrows are the per-utterance tensor flow through the four stages above; dashed
+arrows are model/dictionary data loaded once at `begin()` (from flash or PSRAM), not
+recomputed per call.
+
+```mermaid
+flowchart TD
+    WS[("WeightStore<br/>weights.bin · 2.2MB")]
+    CD[("CmuDict + DictionaryModel<br/>≤3.3MB")]
+
+    TXT["“Hello world!”"] --> G2P["TextG2P<br/>① dictionary → ② neural G2P → ③ char rules"]
+    G2P -->|"phone/tone/lang ids"| ENC["PhonemeEncoder<br/>windowed rel-pos attention ×3"]
+    ENC -->|"m_p, logs_p, x_mask, g"| DUR["DurationPredictor<br/>Conv1d+ChannelNorm+ReLU ×2"]
+    DUR -->|"durations (Σ = t_y = 128 frames)"| EXP["Alignment expand<br/>repeat m_p, logs_p by duration"]
+    EXP -->|"m_p_exp, logs_p_exp [128,32]"| NZ["Sample z_p<br/>m_p_exp + noise_scale·ε·exp(logs_p_exp)"]
+    NZ -->|"z_p [128,32]"| FLOW["Flow (reverse)<br/>4× coupling layer + channel flip"]
+    FLOW -->|"z [128,32]"| DEC["Decoder (vocoder)<br/>5× (ConvTranspose1d + 3 ConvResBlock)"]
+    DEC -->|"waveform, float32 [-1,1]"| OUT{"Audio output"}
+    OUT -->|"raw float"| CB["AudioChunkFn callback"]
+    OUT -->|"int16 PCM, log-scaled volume"| I2S["Print → I2S"]
+
+    CD -.->|"dictionary lookup"| G2P
+    WS -.->|"weights"| ENC
+    WS -.->|"weights"| DUR
+    WS -.->|"weights"| FLOW
+    WS -.->|"weights"| DEC
+```
+
+`TextG2P`'s three tiers are tried in order, first match wins -- the dictionary covers most
+real words, the neural GRU fallback (see "Text-to-phoneme pipeline" below) handles proper
+nouns and unusual words, and character-level rules are the last resort for anything neither
+covers. `WeightStore` is the one buffer backing all four model stages (see "Weights" below),
+not four separate files.
+
 ## Text-to-phoneme pipeline
 
 Text is turned into phonemes by `TextG2P`, a from-scratch port of the upstream project's
@@ -61,7 +98,7 @@ it, not assumed safe.
 
 ## Weights (`weights.bin`)
 
-Every hand-written stage's weights -- `PhonemeEncoder`/`Flow`/`DurationPredictor`/`Decoder`
+Every hand-written stage's weights -- `PhonemeEncoder`/`Flow`/`DurationPredictor`/`Vocoder`
 -- live in one buffer, `weights.bin` (`setWeights()`), extracted directly from the upstream
 PyTorch checkpoint by `research/export_weights_and_vectors.py` -- none of them are exported
 via ONNX or any conversion pipeline, since none of the four stages needs one anymore.

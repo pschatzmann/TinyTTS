@@ -9,7 +9,7 @@ one real constraint on how you split it up.
   limit. `TextG2P::process()` just tokenizes on whitespace and handles punctuation (`.`,
   `,`, `!`, `?`, `-`, `'`) as it goes -- there's nothing sentence-specific about it, it's one
   continuous token stream regardless of how many sentences are in it.
-- Every model stage (`duration_predictor`/`Decoder.h` included) is hand-written C++, run in
+- Every model stage (`duration_predictor`/`Vocoder.h` included) is hand-written C++, run in
   a single pass over the whole utterance -- no TFLite Micro fixed-input-shape window to hit
   anywhere, so a single `speak()` call handles text of any length with no phoneme-count
   ceiling at all. The tradeoff: `speak()` hands its callback the *whole* utterance's audio

@@ -20,8 +20,8 @@
  * dictionary REQUIRES the model to also be wired in, so bundling either
  * with the always-safe default two wouldn't make sense), each data header
  * is included individually below instead of via TinyTTS/Data.h. There's no
- * separate duration_predictor or decoder data header at all -- every model
- * stage is hand-written C++ (DurationPredictor.h/Decoder.h), all their
+ * separate duration_predictor or vocoder data header at all -- every model
+ * stage is hand-written C++ (DurationPredictor.h/Vocoder.h), all their
  * weights are part of default_weights.
  *
  * This much embedded data is larger than any predefined board partition

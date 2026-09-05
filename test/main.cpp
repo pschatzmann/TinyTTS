@@ -4,7 +4,7 @@
 //
 // Exercises TinyTTSCore directly (the portable orchestration layer) AND the
 // top-level TinyTTS facade in src/TinyTTS.h. All four model stages
-// (text_encoder, flow, duration_predictor, decoder) are hand-written C++ --
+// (text_encoder, flow, duration_predictor, vocoder) are hand-written C++ --
 // no TFLite Micro or other inference-runtime dependency anywhere, so this
 // is a plain host build (no CMake fetch step needed for an inference
 // runtime).
@@ -20,10 +20,10 @@
 
 #include "TinyTTS.h"
 #include "TinyTTS/Data.h"
-#include "TinyTTS/Decoder.h"
 #include "TinyTTS/DictionaryModel.h"
 #include "TinyTTS/DurationPredictor.h"
 #include "TinyTTS/TinyTTSCore.h"
+#include "TinyTTS/Vocoder.h"
 #include "TinyTTS/data/default_cmudict_slim_data.h"
 #include "TinyTTS/data/default_dictionary_model_data.h"
 
@@ -192,23 +192,23 @@ static void testFlow(ReferenceData& ref, int n_flows, int n_heads, int window_si
     check(cos_sim(z, z_ref) > 0.9999, "Flow.reverse matches reference");
 }
 
-// Hand-written Decoder forward pass against the PyTorch reference
+// Hand-written Vocoder forward pass against the PyTorch reference
 // (tiny_tts.models.synthesizer.WaveformDecoder, `net_g.dec`). Replaces the
 // TFLite Micro decoder model -- plain Conv1d/ConvTranspose1d/LeakyReLU, no
 // TFLM fixed-window constraint, run in one pass over the whole utterance.
 // Uses the reference flow output (z_ref) as input, so this test is isolated
-// to decoder correctness regardless of Flow's own (separately validated)
+// to vocoder correctness regardless of Flow's own (separately validated)
 // output. Its Conv1d/ConvTranspose1d weights are INT8-quantized (weights-
 // only, per-row scale -- see research/validate_decoder_int8.py, ~27dB SNR),
 // so this no longer matches bit-exact -- 0.998 leaves real margin over the
 // ~0.9991 actually measured, rather than sitting right at the edge of it.
-static void testDecoder(ReferenceData& ref) {
-    Decoder dec;
+static void testVocoder(ReferenceData& ref) {
+    Vocoder dec;
     dec.begin(ref.weights);
 
     Mat g = channel_first_1_to_row(*ref.vectors.get("g"));
     Mat z_ref = channel_first_to_TC(*ref.vectors.get("z_ref"));
-    printf("\n=== Decoder ===\n");
+    printf("\n=== Vocoder ===\n");
     auto audio = dec.forward(z_ref, g);
 
     const WeightStore::Entry* audio_ref_e = ref.vectors.get("audio_ref");
@@ -223,8 +223,8 @@ static void testDecoder(ReferenceData& ref) {
     }
     double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
     printf("cos_sim audio:  %.6f  max_abs_diff=%.6f  n_samples=%d\n", cos, max_diff, n);
-    check((int)audio_ref_e->count == n, "Decoder.forward output length matches reference");
-    check(cos > 0.998, "Decoder.forward matches reference");
+    check((int)audio_ref_e->count == n, "Vocoder.forward output length matches reference");
+    check(cos > 0.998, "Vocoder.forward matches reference");
 }
 
 // Hand-written DurationPredictor forward pass against the PyTorch reference
@@ -353,7 +353,7 @@ static void testDictionaryModel() {
 // flow -> decoder) through TinyTTSCore directly -- every stage is the real
 // hand-written model, loaded from weights_buf by begin() (each independently
 // validated against the PyTorch reference above: testDurationPredictor(),
-// testDecoder(), etc.). Checks shapes/output are consistent end-to-end, not
+// testVocoder(), etc.). Checks shapes/output are consistent end-to-end, not
 // stage-level numerics again.
 static void testTinyTTSCoreOrchestration(const std::vector<uint8_t>& weights_buf,
                                           const std::vector<uint8_t>& cmudict_buf) {
@@ -476,7 +476,7 @@ int main() {
     ReferenceData ref = loadReferenceData();
     PhonemeEncoderOutput enc_out = testPhonemeEncoder(ref, n_heads, window_size);
     testFlow(ref, n_flows, n_heads, window_size);
-    testDecoder(ref);
+    testVocoder(ref);
     std::vector<float> logw = testDurationPredictor(ref, enc_out);
     testAlignment(ref, enc_out, logw);
     testCmuDict(ref.cmudict_buf);

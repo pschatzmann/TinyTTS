@@ -15,13 +15,13 @@
 
 #include "TinyTTS/Alignment.h"
 #include "TinyTTS/CmuDict.h"
-#include "TinyTTS/Decoder.h"
+#include "TinyTTS/DictionaryModel.h"
 #include "TinyTTS/DurationPredictor.h"
 #include "TinyTTS/Flow.h"
-#include "TinyTTS/DictionaryModel.h"
 #include "TinyTTS/Mat.h"
 #include "TinyTTS/PhonemeEncoder.h"
 #include "TinyTTS/TextG2P.h"
+#include "TinyTTS/Vocoder.h"
 #include "TinyTTS/WeightStore.h"
 
 namespace tinytts {
@@ -67,7 +67,7 @@ struct SynthesisInfo {
  *     reusing the same primitives (Ops.h) once the attention path already
  *     needed them -- because doing so removes TFLite Micro's
  *     fixed-input-shape limitation for this stage entirely.
- *   - decoder (Decoder): the HiFi-GAN-style vocoder, likewise plain
+ *   - vocoder (Vocoder): the HiFi-GAN-style vocoder, likewise plain
  *     Conv1d/ConvTranspose1d/LeakyReLU (no attention) and hand-written for
  *     the same reason.
  *
@@ -108,7 +108,7 @@ class TinyTTSCore {
     encoder_.begin(weights_, n_heads, window_size);
     flow_.begin(weights_, n_flows, n_heads, window_size);
     duration_predictor_.begin(weights_);
-    decoder_.begin(weights_);
+    vocoder_.begin(weights_);
 
     const DictionaryModel* dictionary_model_ptr = nullptr;
     if (dictionary_model_buf != nullptr && dictionary_model_len > 0) {
@@ -176,8 +176,8 @@ class TinyTTSCore {
     timingLog("[TinyTTS] flow: %lu ms\n", (unsigned long)(timingMillis() - t_flow0));
 
     uint32_t t_dec0 = timingMillis();
-    auto audio = decoder_.forward(z, g);
-    timingLog("[TinyTTS] decoder: %lu ms, samples=%u\n", (unsigned long)(timingMillis() - t_dec0),
+    auto audio = vocoder_.forward(z, g);
+    timingLog("[TinyTTS] vocoder: %lu ms, samples=%u\n", (unsigned long)(timingMillis() - t_dec0),
               (unsigned)audio.size());
 
     if (on_audio) on_audio(audio.data(), audio.size());
@@ -191,7 +191,7 @@ class TinyTTSCore {
   const PhonemeEncoder& encoder() const { return encoder_; }
   const Flow& flow() const { return flow_; }
   const DurationPredictor& durationPredictor() const { return duration_predictor_; }
-  const Decoder& decoder() const { return decoder_; }
+  const Vocoder& vocoder() const { return vocoder_; }
   const TextG2P& g2p() const { return g2p_; }
   const WeightStore& weights() const { return weights_; }
 
@@ -202,7 +202,7 @@ class TinyTTSCore {
   PhonemeEncoder encoder_;
   Flow flow_;
   DurationPredictor duration_predictor_;
-  Decoder decoder_;
+  Vocoder vocoder_;
   TextG2P g2p_;
   Mat emb_g_;
   int gin_channels_ = 0;

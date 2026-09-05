@@ -22,7 +22,7 @@ namespace tinytts {
  * @author Phil Schatzmann
  * @copyright Apache-2.0
  */
-class Decoder {
+class Vocoder {
  public:
   /// `ws` must outlive this object (conv weights are referenced, not copied).
   void begin(const WeightStore& ws, const std::string& prefix = "dec") {
