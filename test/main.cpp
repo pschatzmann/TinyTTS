@@ -41,6 +41,49 @@ static std::vector<uint8_t> read_file(const std::string& path) {
     return buf;
 }
 
+// Writes `samples` (float, range [-1,1]) as a mono 16-bit PCM WAV file --
+// the same int16 conversion TinyTTS::writeAudio() does for real I2S output,
+// so this is what actually gets played on hardware, not just a debug dump.
+// Lets synthesized audio be inspected/listened to without a board at all.
+static void write_wav(const std::string& path, const float* samples, size_t count, int sample_rate) {
+    std::vector<int16_t> pcm(count);
+    for (size_t i = 0; i < count; i++) {
+        float s = samples[i];
+        if (s > 1.0f) s = 1.0f;
+        if (s < -1.0f) s = -1.0f;
+        pcm[i] = (int16_t)(s * 32767.0f);
+    }
+    uint32_t data_bytes = (uint32_t)(pcm.size() * sizeof(int16_t));
+    uint32_t byte_rate = (uint32_t)sample_rate * 1 /*channels*/ * 2 /*bytes/sample*/;
+    uint16_t block_align = 2;
+    uint16_t bits_per_sample = 16;
+    uint32_t riff_size = 36 + data_bytes;
+
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
+        printf("write_wav: cannot open %s for writing\n", path.c_str());
+        return;
+    }
+    f.write("RIFF", 4);
+    f.write((const char*)&riff_size, 4);
+    f.write("WAVE", 4);
+    f.write("fmt ", 4);
+    uint32_t fmt_size = 16;
+    f.write((const char*)&fmt_size, 4);
+    uint16_t audio_format = 1;  // PCM
+    uint16_t num_channels = 1;
+    f.write((const char*)&audio_format, 2);
+    f.write((const char*)&num_channels, 2);
+    f.write((const char*)&sample_rate, 4);
+    f.write((const char*)&byte_rate, 4);
+    f.write((const char*)&block_align, 2);
+    f.write((const char*)&bits_per_sample, 2);
+    f.write("data", 4);
+    f.write((const char*)&data_bytes, 4);
+    f.write((const char*)pcm.data(), data_bytes);
+    printf("write_wav: wrote %s (%zu samples, %d Hz)\n", path.c_str(), count, sample_rate);
+}
+
 static Mat channel_first_to_TC(const WeightStore::Entry& e) {
     // e.shape == [1, C, T] -> Mat[T, C]
     int C = e.shape[1], T = e.shape[2];
@@ -409,18 +452,19 @@ static void testTinyTTSFacadeSketchData() {
     sketch_tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
     sketch_tts.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
 
-    size_t total_audio_samples = 0;
+    std::vector<float> all_samples;
     bool began = sketch_tts.begin([&](const float* samples, size_t count) {
-        (void)samples;
-        total_audio_samples += count;
+        all_samples.insert(all_samples.end(), samples, samples + count);
     });
     check(began,
           "sketch-equivalent TinyTTS.begin() "
           "(default_weights/default_cmudict_slim/default_dictionary_model)");
     bool spoke = sketch_tts.speak("Hello world!");
     check(spoke, "sketch-equivalent TinyTTS.speak(\"Hello world!\")");
-    printf("total audio samples=%zu\n", total_audio_samples);
-    check(total_audio_samples > 0, "sketch-equivalent facade produces audio");
+    printf("total audio samples=%zu\n", all_samples.size());
+    check(!all_samples.empty(), "sketch-equivalent facade produces audio");
+    if (!all_samples.empty())
+        write_wav("hello_world.wav", all_samples.data(), all_samples.size(), sketch_tts.getAudioSampleRate());
 }
 
 int main() {

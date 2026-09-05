@@ -8,6 +8,9 @@
 
 #ifdef ARDUINO
 #include <Arduino.h>
+#else
+#include <chrono>
+#include <cstdio>
 #endif
 
 #include "TinyTTS/Alignment.h"
@@ -22,6 +25,29 @@
 #include "TinyTTS/WeightStore.h"
 
 namespace tinytts {
+
+// Portable stage-timing helper: wall-clock milliseconds and a matching
+// print, so synthesize()'s per-stage breakdown below works identically on
+// Arduino (Serial.printf) and a plain host build (printf) -- useful on
+// device to see where time actually goes, and on host to get a baseline
+// without needing hardware at all.
+inline uint32_t timingMillis() {
+#ifdef ARDUINO
+  return millis();
+#else
+  using namespace std::chrono;
+  return (uint32_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+#endif
+}
+
+template <typename... Args>
+inline void timingLog(const char* fmt, Args... args) {
+#ifdef ARDUINO
+  Serial.printf(fmt, args...);
+#else
+  printf(fmt, args...);
+#endif
+}
 
 /// Metadata about a completed synthesize() call -- NOT the audio itself.
 struct SynthesisInfo {
@@ -125,21 +151,15 @@ class TinyTTSCore {
     Mat g(1, gin_channels_);
     for (int c = 0; c < gin_channels_; c++) g.at(0, c) = emb_g_.at(speaker_id, c);
 
-#ifdef ARDUINO
-    uint32_t t_enc0 = millis();
-#endif
+    uint32_t t_enc0 = timingMillis();
     PhonemeEncoderOutput enc_out = encoder_.forward(phone_ids, tone_ids, language_ids, g);
-#ifdef ARDUINO
-    Serial.printf("[TinyTTS] encoder: %lu ms\n", millis() - t_enc0);
-    uint32_t t_dp0 = millis();
-#endif
+    timingLog("[TinyTTS] encoder: %lu ms\n", (unsigned long)(timingMillis() - t_enc0));
 
+    uint32_t t_dp0 = timingMillis();
     std::vector<float> logw = duration_predictor_.forward(enc_out.x, g);
     std::vector<int> durations = alignment::durationsFromLogw(logw, length_scale);
     int t_y = alignment::totalDuration(durations);
-#ifdef ARDUINO
-    Serial.printf("[TinyTTS] duration_predictor: %lu ms, t_y=%d\n", millis() - t_dp0, t_y);
-#endif
+    timingLog("[TinyTTS] duration_predictor: %lu ms, t_y=%d\n", (unsigned long)(timingMillis() - t_dp0), t_y);
 
     Mat m_p_exp = alignment::expandByDuration(enc_out.m_p, durations, t_y);
     Mat logs_p_exp = alignment::expandByDuration(enc_out.logs_p, durations, t_y);
@@ -151,18 +171,15 @@ class TinyTTSCore {
       for (int c = 0; c < m_p_exp.cols(); c++)
         z_p.at(t, c) = m_p_exp.at(t, c) + normal(rng) * std::exp(logs_p_exp.at(t, c)) * noise_scale;
 
-#ifdef ARDUINO
-    uint32_t t_flow0 = millis();
-#endif
+    uint32_t t_flow0 = timingMillis();
     Mat z = flow_.reverse(z_p, g);
-#ifdef ARDUINO
-    Serial.printf("[TinyTTS] flow: %lu ms\n", millis() - t_flow0);
-    uint32_t t_dec0 = millis();
-#endif
+    timingLog("[TinyTTS] flow: %lu ms\n", (unsigned long)(timingMillis() - t_flow0));
+
+    uint32_t t_dec0 = timingMillis();
     auto audio = decoder_.forward(z, g);
-#ifdef ARDUINO
-    Serial.printf("[TinyTTS] decoder: %lu ms, samples=%u\n", millis() - t_dec0, (unsigned)audio.size());
-#endif
+    timingLog("[TinyTTS] decoder: %lu ms, samples=%u\n", (unsigned long)(timingMillis() - t_dec0),
+              (unsigned)audio.size());
+
     if (on_audio) on_audio(audio.data(), audio.size());
 
     info.durations = std::move(durations);
