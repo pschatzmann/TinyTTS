@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,19 @@ class TinyTTS {
   void setSpeakerId(int speaker_id) { speaker_id_ = speaker_id; }
   void setNoiseScale(float noise_scale) { noise_scale_ = noise_scale; }
   void setLengthScale(float length_scale) { length_scale_ = length_scale; }
+
+  /// Scales the PCM data written to the Print output (begin(Print&)/the
+  /// no-arg begin()) -- 1.0 is the model's native (full-scale) loudness,
+  /// 0.0 is silence. Perceived loudness is logarithmic, not linear (see
+  /// volumeToGain() below), so this value is mapped through a dB taper
+  /// rather than multiplied onto the samples directly: a straight linear
+  /// gain of 0.2 is still only about -14dB, which barely sounds quieter
+  /// than full volume to the ear -- confirmed uncomfortably loud on real
+  /// hardware even at that setting. Default 0.4, log-scaled (confirmed a
+  /// comfortable level on real hardware at this setting). Doesn't
+  /// affect begin(const AudioChunkFn&)'s raw float samples -- those stay
+  /// the model's true, unscaled output.
+  void setVolume(float volume) { volume_ = volume; }
 
   // ---- output PCM format produced by speak() -- always mono/16-bit at the
   // model's native rate, so callers can configure their audio output (e.g.
@@ -204,11 +218,23 @@ class TinyTTS {
 
  private:
 #ifdef ARDUINO
+  // Maps a 0..1 volume setting to a linear gain via a dB taper -- see
+  // setVolume()'s doc for why (perceived loudness is logarithmic).
+  // kDynamicRangeDb=40 means volume=0 -> -40dB (near-silent, not a hard
+  // mute) and volume=1 -> 0dB (unity gain, the model's native loudness).
+  static float volumeToGain(float volume) {
+    if (volume <= 0.0f) return 0.0f;
+    if (volume >= 1.0f) return 1.0f;
+    constexpr float kDynamicRangeDb = 40.0f;
+    return std::pow(10.0f, (volume - 1.0f) * kDynamicRangeDb / 20.0f);
+  }
+
   void writeAudio(const float* samples, size_t count) {
     if (!output_) return;
     pcm_buf_.resize(count);
+    float gain = volumeToGain(volume_);
     for (size_t i = 0; i < count; i++) {
-      float s = samples[i];
+      float s = samples[i] * gain;
       if (s > 1.0f) s = 1.0f;
       if (s < -1.0f) s = -1.0f;
       pcm_buf_[i] = (int16_t)(s * 32767.0f);
@@ -225,6 +251,7 @@ class TinyTTS {
   int speaker_id_ = 0;
   float noise_scale_ = 0.667f;
   float length_scale_ = 1.0f;
+  float volume_ = 0.4f;
   int sample_rate_ = 44100;  // tiny_tts.utils.config.SAMPLING_RATE
 
 #ifdef ARDUINO

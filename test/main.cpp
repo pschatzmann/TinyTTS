@@ -198,7 +198,10 @@ static void testFlow(ReferenceData& ref, int n_flows, int n_heads, int window_si
 // TFLM fixed-window constraint, run in one pass over the whole utterance.
 // Uses the reference flow output (z_ref) as input, so this test is isolated
 // to decoder correctness regardless of Flow's own (separately validated)
-// output.
+// output. Its Conv1d/ConvTranspose1d weights are INT8-quantized (weights-
+// only, per-row scale -- see research/validate_decoder_int8.py, ~27dB SNR),
+// so this no longer matches bit-exact -- 0.998 leaves real margin over the
+// ~0.9991 actually measured, rather than sitting right at the edge of it.
 static void testDecoder(ReferenceData& ref) {
     Decoder dec;
     dec.begin(ref.weights);
@@ -221,7 +224,7 @@ static void testDecoder(ReferenceData& ref) {
     double cos = dot / (std::sqrt(na) * std::sqrt(nb) + 1e-12);
     printf("cos_sim audio:  %.6f  max_abs_diff=%.6f  n_samples=%d\n", cos, max_diff, n);
     check((int)audio_ref_e->count == n, "Decoder.forward output length matches reference");
-    check(cos > 0.999, "Decoder.forward matches reference");
+    check(cos > 0.998, "Decoder.forward matches reference");
 }
 
 // Hand-written DurationPredictor forward pass against the PyTorch reference

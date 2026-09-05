@@ -7,7 +7,7 @@
 
 A header-only C++ port of [tronghieuit/tiny-tts](https://github.com/tronghieuit/tiny-tts) — a
 ~1.6M-parameter, VITS-style, end-to-end neural text-to-speech model — with **no external
-inference-runtime dependency**, as an Arduino library.
+inference-runtime dependency**, as an Arduino library. This is a proof of concept to evaluate if Machine Learning based TTS systems can be used on current Microcontrollers.
 
 ```cpp
 #include <TinyTTS.h>
@@ -187,6 +187,55 @@ any of these with different settings.
   the model's multi-megabyte weight/dictionary data needs a module with real PSRAM -- so
   this isn't a "runs on any microcontroller" library, just one with no inference-runtime
   dependency within that family.
+
+## Conclusions
+
+As a proof of concept -- can a ML-based, VITS-style neural TTS model run on a current
+microcontroller at all, with no external inference-runtime dependency -- the answer is yes,
+but not yet in real time. Real, flashed-hardware numbers for `speak("Hello world!")`
+(1.49s of resulting audio), after a full optimization pass (INT8 weight quantization, tiled
+weight caching, SIMD-accelerated dot products -- see `docs/performance.md` for the complete
+story, including what was tried and didn't work):
+
+| Board | Total time | vs. unoptimized baseline | Real-time factor |
+|---|---:|---:|---:|
+| ESP32-S3 (unoptimized baseline) | ~439.7 s | -- | ~296x slower than real time |
+| ESP32-S3 (optimized) | ~47.1 s | ~9.3x faster | ~32x slower than real time |
+| ESP32-P4 (optimized) | ~28.4 s | ~15.5x faster | ~19x slower than real time |
+| Desktop (optimized, for reference) | ~0.76 s | ~581x faster | ~0.51x -- *faster* than real time |
+
+The desktop row is the same optimized code, unmodified, running the host build (an
+Intel Core i7-4650U laptop CPU @ 1.7GHz, nothing exotic) instead of an ESP32 -- included as a
+reference point, not a target: no PSRAM/flash-fetch latency, no weight tiling/caching
+pressure, no 32-bit-only FPU-bound microcontroller core to work around. It shows how much of
+the *original* ~7.3-minute number was specifically an embedded-hardware problem (memory
+latency, a comparatively weak FPU) rather than the model architecture being inherently slow.
+
+That's a genuine ~9-16x improvement from optimization work alone, on the same hardware
+class, with no change to model quality (every step verified against the reference PyTorch
+model via cosine similarity/SNR, plus a runtime correctness check on real hardware for every
+change). It's also still roughly 20-30x slower than real time on-device -- clearly usable for
+short, pre-triggered utterances (a voice assistant's occasional spoken response, not live
+conversation), not yet for anything latency-sensitive. The single biggest remaining lever
+identified but not yet attempted is retraining the model at a lower native sample rate
+(16kHz instead of 44.1kHz), projected at a further ~2.6x on top of the numbers above --
+see `docs/performance.md` for the reasoning and what else was considered.
+
+The on-device numbers above already include one free win worth calling out: the Arduino
+ESP32 core compiles at `-Os` (size) by default, and switching to `-O2` measured ~15% faster
+on real hardware for no source change and negligible flash cost -- pass
+`--build-property "compiler.optimization_flags=-O2"` to `arduino-cli compile` (or your
+build system's equivalent). See `docs/performance.md` for the measurement.
+
+Memory footprint is not the constraint here, which is itself a notable part of this proof
+of concept: current microcontrollers have enough flash and RAM to hold a small, optimized
+TTS model comfortably. The recommended data set (weights + slimmed dictionary + neural G2P
+fallback model, see "Model data sizes" above) is **4.21 MB total**, well within a 16MB-flash
+module's PROGMEM/flash budget with plenty of room left for application code -- and on real
+hardware, PSRAM actually used after `begin()` was only **~743 KB**, whether on an 8MB-PSRAM
+ESP32-S3 module or a 32MB-PSRAM ESP32-P4 module (the rest of PSRAM stays free for the rest
+of the application). The bottleneck this project ran into was entirely compute time, never
+memory.
 
 ## Attribution
 

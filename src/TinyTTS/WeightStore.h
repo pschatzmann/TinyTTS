@@ -47,7 +47,10 @@ inline float halfToFloat(uint16_t h) {
  *             [int32 dtype][data...]
  *   terminated by name_len == 0
  *   dtype 0: data is float32 (4 bytes/element). dtype 1: data is float16
- *   (IEEE 754 binary16, 2 bytes/element).
+ *   (IEEE 754 binary16, 2 bytes/element). dtype 2: data is
+ *   [float32 row_scale[shape[0]]][int8 data[count]] -- symmetric per-row
+ *   (dim0) INT8, weights-only (used for `decoder`'s Conv1d/ConvTranspose1d
+ *   weights; see docs/architecture.md for why and the accuracy numbers).
  *
  * Zero-copy: `begin()` only records, per tensor, a pointer into the buffer
  * it was given plus its shape/dtype -- it never copies or expands the
@@ -71,8 +74,9 @@ class WeightStore {
   struct Entry {
     std::vector<int> shape;
     const uint8_t* raw = nullptr;  // dtype-encoded bytes, count elements, into the caller's buffer
+    const uint8_t* row_scale = nullptr;  // dtype 2 only: shape[0] per-row float32 scales
     size_t count = 0;
-    int32_t dtype = 0;  // 0=float32, 1=float16
+    int32_t dtype = 0;  // 0=float32, 1=float16, 2=int8 (per-row scale)
 
     float at(size_t i) const {
       if (dtype == 0) {
@@ -80,9 +84,53 @@ class WeightStore {
         std::memcpy(&v, raw + i * 4, 4);
         return v;
       }
-      uint16_t h;
-      std::memcpy(&h, raw + i * 2, 2);
-      return halfToFloat(h);
+      if (dtype == 1) {
+        uint16_t h;
+        std::memcpy(&h, raw + i * 2, 2);
+        return halfToFloat(h);
+      }
+      // dtype == 2
+      return (float)(int8_t)raw[i] * rowScale(i / rowSize());
+    }
+
+    /// Decodes `n` contiguous elements starting at `start` into `out`.
+    /// Branches on dtype once per call instead of once per element -- use
+    /// this over repeated at() calls in a hot loop over a contiguous run
+    /// (e.g. one kernel position's worth of weights). The run must not
+    /// cross a row (dim0) boundary for dtype 2 -- true for every call site
+    /// in this project (conv1d()/convTranspose1d() only ever decode one
+    /// kernel position's worth of weights for a fixed output/input channel
+    /// pair, which is always within one row).
+    void decodeRun(size_t start, size_t n, float* out) const {
+      if (dtype == 0) {
+        std::memcpy(out, raw + start * 4, n * 4);
+        return;
+      }
+      if (dtype == 1) {
+        const uint8_t* p = raw + start * 2;
+        for (size_t i = 0; i < n; i++) {
+          uint16_t h;
+          std::memcpy(&h, p + i * 2, 2);
+          out[i] = halfToFloat(h);
+        }
+        return;
+      }
+      // dtype == 2
+      float scale = rowScale(start / rowSize());
+      for (size_t i = 0; i < n; i++) out[i] = (float)(int8_t)raw[start + i] * scale;
+    }
+
+   private:
+    size_t rowSize() const { return count / (size_t)shape[0]; }
+
+    // row_scale may not be 4-byte aligned (it sits right after a
+    // variable-length name + shape header in the buffer) -- memcpy instead
+    // of dereferencing, same reason at()/decodeRun() memcpy raw for
+    // dtype 0/1 rather than casting to a float* directly.
+    float rowScale(size_t row) const {
+      float v;
+      std::memcpy(&v, row_scale + row * 4, 4);
+      return v;
     }
   };
 
@@ -114,17 +162,28 @@ class WeightStore {
 
       if (pos + 4 > len) return false;
       int32_t dtype = read_i32(buf, pos);
-      size_t elem_size = dtype == 0 ? 4 : (dtype == 1 ? 2 : 0);
-      if (elem_size == 0) return false;  // unknown dtype
-      if (pos + (size_t)total * elem_size > len) return false;
+      if (dtype != 0 && dtype != 1 && dtype != 2) return false;  // unknown dtype
 
       Entry e;
-      e.shape = std::move(shape);
-      e.raw = buf + pos;
+      e.shape = shape;
       e.count = (size_t)total;
       e.dtype = dtype;
+
+      if (dtype == 2) {
+        if (shape.empty()) return false;
+        size_t scale_bytes = (size_t)shape[0] * 4;
+        if (pos + scale_bytes + (size_t)total > len) return false;
+        e.row_scale = buf + pos;
+        pos += scale_bytes;
+        e.raw = buf + pos;
+        pos += (size_t)total;
+      } else {
+        size_t elem_size = dtype == 0 ? 4 : 2;
+        if (pos + (size_t)total * elem_size > len) return false;
+        e.raw = buf + pos;
+        pos += (size_t)total * elem_size;
+      }
       entries_[name] = e;
-      pos += (size_t)total * elem_size;
     }
     return true;
   }

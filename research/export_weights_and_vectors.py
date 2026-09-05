@@ -19,6 +19,16 @@ WeightStore.h parses both:
     weights.bin -- halves its size for a rounding-error-level precision
     cost (see docs/research.md for the numbers checked before trusting
     this).
+  dtype 2: data is [float32 row_scale[dim0]][int8 data[count]] -- symmetric
+    per-row (dim0) INT8 quantization, weights-only (activations stay
+    float32), scale = max(abs(row))/127. Used for `decoder`'s
+    Conv1d/ConvTranspose1d weights (research/validate_decoder_int8.py
+    checked accuracy before trusting this -- ~27dB SNR, see
+    docs/research.md), same scheme DictionaryModel's GRU weights already
+    use, chosen over the old TFLite Micro decoder's full-INT8-with-INT16-
+    activations scheme because weights-only quantization measured *better*
+    audio quality and TFLite Micro's "hybrid model" rejection (the reason
+    that scheme wasn't used originally) doesn't apply to hand-written code.
 """
 import os
 import struct
@@ -70,7 +80,32 @@ def write_terminator(f):
     f.write(struct.pack("<i", 0))
 
 
-def export_state_dict_subset(net_g, prefixes, out_path, exclude=(), dtype="float32"):
+def quantize_rows(w):
+    """Symmetric per-row (dim0) int8: scale = max(abs(row))/127, zero_point
+    0 -- same scheme as export_dictionary_model.py's quantize_rows(), but
+    N-D-shaped (flattens dims 1.. before computing per-row scale)."""
+    flat = w.reshape(w.shape[0], -1)
+    scales = np.abs(flat).max(axis=1) / 127.0
+    scales[scales == 0] = 1.0  # an all-zero row would divide by zero otherwise
+    q = np.round(flat / scales[:, None]).clip(-127, 127).astype(np.int8).reshape(w.shape)
+    return q, scales.astype(np.float32)
+
+
+def write_quantized_tensor(f, name, arr):
+    """dtype 2: per-row (dim0) INT8, see module docstring."""
+    q, scales = quantize_rows(np.ascontiguousarray(arr.astype(np.float32)))
+    name_b = name.encode("utf-8")
+    f.write(struct.pack("<i", len(name_b)))
+    f.write(name_b)
+    f.write(struct.pack("<i", q.ndim))
+    for d in q.shape:
+        f.write(struct.pack("<i", d))
+    f.write(struct.pack("<i", 2))
+    f.write(scales.tobytes())
+    f.write(np.ascontiguousarray(q).tobytes())
+
+
+def export_state_dict_subset(net_g, prefixes, out_path, exclude=(), dtype="float32", quantize_rows_of=()):
     sd = net_g.state_dict()
     with open(out_path, "wb") as f:
         n = 0
@@ -78,7 +113,10 @@ def export_state_dict_subset(net_g, prefixes, out_path, exclude=(), dtype="float
             if k in exclude:
                 continue
             if any(k.startswith(p) for p in prefixes):
-                write_tensor(f, k, v.detach().numpy(), dtype=dtype)
+                if k in quantize_rows_of:
+                    write_quantized_tensor(f, k, v.detach().numpy())
+                else:
+                    write_tensor(f, k, v.detach().numpy(), dtype=dtype)
                 n += 1
         write_terminator(f)
     print(f"wrote {n} tensors to {out_path}")
@@ -97,10 +135,20 @@ UNUSED_BERT_PROJ_WEIGHTS = {"enc_p.bert_proj.weight", "enc_p.ja_bert_proj.weight
 def main():
     net_g = load_model()
 
+    # Every Conv1d/ConvTranspose1d weight in `decoder` -- matches
+    # validate_decoder_int8.py's scope exactly, so what got accuracy-checked
+    # is what actually ships. Biases stay float16 (tiny, not worth it).
+    decoder_quantized_weights = {
+        f"dec.{name}.weight"
+        for name, module in net_g.dec.named_modules()
+        if isinstance(module, (torch.nn.Conv1d, torch.nn.ConvTranspose1d))
+    }
+
     export_state_dict_subset(
         net_g, ["enc_p.", "flow.", "emb_g.", "dp.", "dec."], os.path.join(OUT_DIR, "weights.bin"),
-        exclude=UNUSED_BERT_PROJ_WEIGHTS, dtype="float16",
+        exclude=UNUSED_BERT_PROJ_WEIGHTS, dtype="float16", quantize_rows_of=decoder_quantized_weights,
     )
+    print(f"quantized {len(decoder_quantized_weights)} decoder Conv1d/ConvTranspose1d weight tensors to INT8")
 
     # ---- reference test vectors ----
     T = 17
