@@ -69,6 +69,15 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
   (for `I2SStream`/audio output — `TinyTTS` itself only needs a plain Arduino `Print`, so any
   audio-tools output class works, or your own `Print` implementation). No inference-runtime
   library (TFLite Micro or otherwise) is needed -- every model stage is hand-written C++.
+- **Optional, for a real ~1.5-2x speedup on ESP32-S3/P4** (not required — TinyTTS compiles
+  and runs correctly without it, just slower): install `esp-dsp-dotprod/` (shipped in this
+  repo — a minimal, Arduino-compatible vendored copy of three modules from
+  [espressif/esp-dsp](https://github.com/espressif/esp-dsp), since upstream is an ESP-IDF
+  component `arduino-cli` can't load directly) as its own sibling library in your Arduino
+  libraries folder — see `esp-dsp-dotprod/README.md` for the one-line copy command and why it
+  has to be a separate top-level library rather than something bundled invisibly inside this
+  one. `Ops.h` detects it automatically (`__has_include`) and falls back to a plain scalar
+  loop if it isn't installed — see `docs/performance.md` for the measured difference.
 
 ### ESP-IDF
 

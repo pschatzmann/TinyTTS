@@ -11,14 +11,16 @@
 // on ESP32-S3/P4, generic-optimized elsewhere in the ESP32 family). Only
 // dsps_dotprod.h (not the esp_dsp.h umbrella, which pulls in ~15 unrelated
 // modules -- FFT/FIR/biquad/etc -- none of which this project needs) --
-// see esp-dsp-dotprod/README.md (a minimal vendored copy of just the
-// dotprod module, since upstream github.com/espressif/esp-dsp is an
-// ESP-IDF component arduino-cli can't load directly: "invalid library: no
-// header files found"). Guarded by __has_include rather than a hard
-// library.properties dependency, so a sketch that hasn't installed the
-// vendored copy (or a non-ESP32/host build) still compiles and just uses
-// the plain scalar loop below -- "use it when we have one of the supported
-// processors", not a hard requirement.
+// see src/esp-dsp-dotprod/NOTICE.md (a minimal vendored copy of just the
+// dotprod/mulc/add modules, since upstream github.com/espressif/esp-dsp is
+// an ESP-IDF component arduino-cli can't load directly: "invalid library:
+// no header files found"). Lives directly under this library's own src/
+// tree (not a separate library a sketch has to install by hand) so
+// Arduino's normal recursive src/ header discovery finds it automatically
+// on any ESP32-family board -- no extra install step. Still guarded by
+// __has_include rather than a hard library.properties dependency, so a
+// host/desktop build still compiles and just uses the plain scalar loop
+// below.
 #if defined(ESP32) && __has_include(<dsps_dotprod.h>)
 #include <dsps_dotprod.h>
 #include <dsps_mulc.h>
