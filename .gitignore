@@ -1,0 +1,17 @@
+# Python virtualenv for research/ tooling (regenerate: see docs/research.md)
+research/venv/
+
+# Cloned upstream reference repo (regenerate: git clone the develop branch of
+# https://github.com/tronghieuit/tiny-tts into research/tiny-tts)
+research/tiny-tts/
+
+__pycache__/
+*.pyc
+
+# Arduino build artifacts
+build/
+build_*/
+.pio/
+
+# host-side test binary
+test/test_main
