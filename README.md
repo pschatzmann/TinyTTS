@@ -199,8 +199,8 @@ any of these with different settings.
 ## Conclusions
 
 As a proof of concept -- can a ML-based, VITS-style neural TTS model run on a current
-microcontroller at all, with no external inference-runtime dependency -- the answer is yes,
-but not yet in real time. Real, flashed-hardware numbers for `speak("Hello world!")`
+microcontroller at all, with no external inference-runtime dependency -- the answer is __yes,
+but not yet in real time__. Real, flashed-hardware numbers for `speak("Hello world!")`
 (1.49s of resulting audio), after a full optimization pass (INT8 weight quantization, tiled
 weight caching, SIMD-accelerated dot products -- see `docs/performance.md` for the complete
 story, including what was tried and didn't work):
