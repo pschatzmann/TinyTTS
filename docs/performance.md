@@ -53,9 +53,15 @@ bias term and every kernel tap but the last, corrupting `duration_predictor`'s o
 `esp-dsp` itself isn't usable as a normal Arduino library -- upstream
 (github.com/espressif/esp-dsp) is an ESP-IDF component (headers nested under
 `modules/*/include/`, no `library.properties`); `arduino-cli` rejects it outright
-(`invalid library: no header files found`). A minimal, Arduino-compatible vendored copy of
-just the `dotprod`/`mulc`/`add` modules (not the `esp_dsp.h` umbrella, which pulls in ~15
-unrelated modules -- FFT/FIR/biquad/etc) lives at `esp-dsp-dotprod/` alongside this library.
+(`invalid library: no header files found`). A minimal, flattened vendored copy of just the
+`dotprod`/`mulc`/`add` modules (not the `esp_dsp.h` umbrella, which pulls in ~15 unrelated
+modules -- FFT/FIR/biquad/etc) lives directly at `src/esp-dsp-dotprod/`, inside TinyTTS's own
+`src/` tree -- **not** a separate library a user has to install by hand. An earlier version
+of this lived as a separate sibling Arduino library, which meant the SIMD path silently
+never activated unless someone remembered a manual install step; moving it into TinyTTS's
+own `src/` tree means Arduino's normal recursive header/source discovery finds it
+automatically on any ESP32-family board, with zero extra setup -- see
+`src/esp-dsp-dotprod/NOTICE.md` for what's vendored and why.
 
 `convTranspose1d`'s scatter pattern (`y[t][co] += x*w`, not a gather) was also given a
 SIMD path (`dsps_mulc_f32` scale + `dsps_add_f32` accumulate, since esp-dsp has no float32
@@ -94,7 +100,8 @@ Tested on a real Guition ESP32-P4 board (16MB flash, 32MB PSRAM) via a timing-on
 sketch (`AudioChunkFn` callback, no I2S/codec output wired up) -- same weights, same INT8
 quantization, same tiled weight caching, same `esp-dsp` SIMD dot product (P4 gets its own
 genuine SIMD kernel, `dsps_dotprod_f32_arp4` -- RISC-V assembly, distinct from S3's Xtensa
-`_aes3` kernel, both already vendored in `esp-dsp-dotprod/`). Required
+`_aes3` kernel, both already vendored in `src/esp-dsp-dotprod/` and confirmed linked in via a
+symbol check -- no separate library install needed, see above). Required
 `USBMode=hwcdc,CDCOnBoot=cdc` for native-USB Serial to work at all, same as the S3 board.
 
 | Stage | ESP32-S3 (240MHz) | ESP32-P4 (400MHz) | Speedup | Desktop (reference) |

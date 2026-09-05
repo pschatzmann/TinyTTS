@@ -69,15 +69,14 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
   (for `I2SStream`/audio output — `TinyTTS` itself only needs a plain Arduino `Print`, so any
   audio-tools output class works, or your own `Print` implementation). No inference-runtime
   library (TFLite Micro or otherwise) is needed -- every model stage is hand-written C++.
-- **Optional, for a real ~1.5-2x speedup on ESP32-S3/P4** (not required — TinyTTS compiles
-  and runs correctly without it, just slower): install `esp-dsp-dotprod/` (shipped in this
-  repo — a minimal, Arduino-compatible vendored copy of three modules from
-  [espressif/esp-dsp](https://github.com/espressif/esp-dsp), since upstream is an ESP-IDF
-  component `arduino-cli` can't load directly) as its own sibling library in your Arduino
-  libraries folder — see `esp-dsp-dotprod/README.md` for the one-line copy command and why it
-  has to be a separate top-level library rather than something bundled invisibly inside this
-  one. `Ops.h` detects it automatically (`__has_include`) and falls back to a plain scalar
-  loop if it isn't installed — see `docs/performance.md` for the measured difference.
+- **No extra step needed for the ESP32-S3/P4 SIMD speedup.** `src/esp-dsp-dotprod/` ships a
+  minimal, flattened vendored copy of three modules from
+  [espressif/esp-dsp](https://github.com/espressif/esp-dsp) (upstream is an ESP-IDF
+  component `arduino-cli` can't load directly) directly inside this library's own `src/`
+  tree, so Arduino picks it up automatically like any other TinyTTS header — nothing to
+  install separately. `Ops.h` detects it via `__has_include` and falls back to a plain
+  scalar loop on non-ESP32/host builds; see `src/esp-dsp-dotprod/NOTICE.md` for what it is
+  and `docs/performance.md` for the measured difference (a real ~1.5-2x on the affected ops).
 
 ### ESP-IDF
 
@@ -236,7 +235,7 @@ on real hardware for no source change and negligible flash cost -- pass
 `--build-property "compiler.optimization_flags=-O2"` to `arduino-cli compile` (or your
 build system's equivalent). See `docs/performance.md` for the measurement.
 
-Memory footprint is not the constraint here, which is itself a notable part of this proof
+__Memory footprint__ is not the constraint here, which is itself a notable part of this proof
 of concept: current microcontrollers have enough flash and RAM to hold a small, optimized
 TTS model comfortably. The recommended data set (weights + slimmed dictionary + neural G2P
 fallback model, see "Model data sizes" above) is **4.21 MB total**, well within a 16MB-flash

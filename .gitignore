@@ -12,6 +12,7 @@ __pycache__/
 build/
 build_*/
 .pio/
+.claude/
 
 # host-side test binary
 test/test_main
