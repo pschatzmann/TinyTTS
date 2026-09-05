@@ -46,11 +46,8 @@ sketch (it needs specific board settings to compile — see "Requirements" below
 
 Generated `hello_world.wav` from this project:
 
-GitHub's README renderer does not reliably show an inline `<audio>` player here, so use the
-raw file URL to play it directly in the browser:
+[▶️ Play `hello_world.wav`](https://cdn.jsdelivr.net/gh/pschatzmann/TinyTTS@main/docs/assets/hello_world.wav)
 
-- [▶️ Play `hello_world.wav` (raw)](https://raw.githubusercontent.com/pschatzmann/TinyTTS/main/docs/assets/hello_world.wav)
-- [Alternative raw link](https://github.com/pschatzmann/TinyTTS/raw/main/docs/assets/hello_world.wav)
 
 ## How it works
 
