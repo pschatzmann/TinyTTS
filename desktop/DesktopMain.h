@@ -26,6 +26,7 @@
 #include "AudioTools.h"
 #include "AudioTools/AudioLibs/MiniAudioStream.h"
 #include "TinyTTS.h"
+#include "TinyTTS/data/default_cmudict_data.h"
 #include "TinyTTS/data/default_cmudict_slim_data.h"
 #include "TinyTTS/data/default_dictionary_model_data.h"
 #include "TinyTTS/data/default_weights_data.h"
@@ -93,11 +94,22 @@ class DesktopMain {
       }
     }
 
-    // Same three embedded data buffers examples/tts_i2s_output uses -- see
-    // that sketch's doc for why this combo (slimmed dictionary + neural
-    // G2P fallback) is the recommended one.
     tts_.setWeights(default_weights, default_weights_len);
-    tts_.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
+    if (opt.full_dict) {
+      // The full dictionary instead of the slimmed one -- still paired
+      // with the neural G2P fallback (for whatever even the full
+      // dictionary doesn't cover, e.g. proper nouns/made-up words), just
+      // without the slimming that trims the dictionary down to the words
+      // the fallback doesn't already predict correctly on its own. See
+      // docs/model-data.md for why slimmed+G2P is the *recommended*
+      // default even on desktop (smaller AND better aggregate coverage,
+      // not just an ESP32 size compromise) -- this is for when
+      // deterministic full-dictionary lookup matters more than that.
+      tts_.setDictionary(default_cmudict, default_cmudict_len);
+    } else {
+      // Same combo examples/tts_i2s_output uses by default.
+      tts_.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
+    }
     tts_.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
     if (!tts_.begin([this, should_play](const float* samples, size_t count) {
           onAudio(samples, count, should_play);
@@ -167,6 +179,7 @@ class DesktopMain {
     float length_scale = 1.0f;
     int speaker = 0;
     int threads = 2;  // matches TinyTTS::setNumWorkers()'s own default
+    bool full_dict = false;
     bool help_requested = false;
   };
 
@@ -193,6 +206,10 @@ class DesktopMain {
                   "  --speaker ID          default 0\n"
                   "  --threads N           worker count for the decoder's parallel conv loops,\n"
                   "                        default 2 (this machine has %u hardware threads)\n"
+                  "  --full-dict           Use the full CMU dictionary instead of the slimmed\n"
+                  "                        one (still paired with the neural G2P fallback) --\n"
+                  "                        see docs/model-data.md for why slimmed+G2P is the\n"
+                  "                        recommended default even so.\n"
                   "\n"
                   "  -h, --help            Show this help text.\n",
                   prog, prog, prog, std::thread::hardware_concurrency());
@@ -244,6 +261,8 @@ class DesktopMain {
         const char* v = next(a.c_str());
         if (!v) return false;
         opt.threads = std::atoi(v);
+      } else if (a == "--full-dict") {
+        opt.full_dict = true;
       } else if (!a.empty() && a[0] == '-' && a != "-") {
         std::fprintf(stderr, "unknown option: %s\n", a.c_str());
         printUsage(argv[0]);

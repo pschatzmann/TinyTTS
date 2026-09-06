@@ -100,6 +100,9 @@ Voice tuning:
   --speaker ID          default 0
   --threads N           worker count for the decoder's parallel conv loops, default 2
                         (needs -DTINYTTS_BUILD_PARALLEL_OPS=ON -- see above)
+  --full-dict           Use the full CMU dictionary instead of the slimmed one (still
+                        paired with the neural G2P fallback) -- see docs/model-data.md
+                        for why slimmed+G2P is the recommended default even so.
 
   -h, --help            Show this help text.
 ```
