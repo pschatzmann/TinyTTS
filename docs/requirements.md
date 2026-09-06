@@ -21,14 +21,15 @@ to the desktop build, and vice versa.
   (for `I2SStream`/audio output — `TinyTTS` itself only needs a plain Arduino `Print`, so any
   audio-tools output class works, or your own `Print` implementation). No inference-runtime
   library (TFLite Micro or otherwise) is needed -- every model stage is hand-written C++.
-- **No extra step needed for the ESP32-S3/P4 SIMD speedup.** `src/esp-dsp-dotprod/` ships a
-  minimal, flattened vendored copy of three modules from
-  [espressif/esp-dsp](https://github.com/espressif/esp-dsp) (upstream is an ESP-IDF
-  component `arduino-cli` can't load directly) directly inside this library's own `src/`
-  tree, so Arduino picks it up automatically like any other TinyTTS header — nothing to
-  install separately. `Ops.h` detects it via `__has_include` and falls back to a plain
-  scalar loop on non-ESP32/host builds; see `src/esp-dsp-dotprod/NOTICE.md` for what it is
-  and `docs/performance.md` for the measured difference (a real ~1.5-2x on the affected ops).
+- **No extra step needed for the ESP32-S3/P4 SIMD speedup.** Float32 SIMD comes from the
+  Arduino-ESP32 core's own bundled `esp-dsp` component (~3.3.x+ cores ship one) —
+  `Ops.h` detects it via `__has_include` and falls back to a plain scalar loop on
+  non-ESP32/host builds or older cores; see `docs/performance.md` for the measured
+  difference (a real ~1.5-2x on the affected ops). INT8 SIMD (the decoder-precision
+  prototype, see `docs/performance.md`) is genuinely vendored — the core doesn't provide
+  it — directly inside this library's own `src/int8-dotprod/` tree, so Arduino picks it
+  up automatically like any other TinyTTS header, nothing to install separately; see
+  `src/int8-dotprod/NOTICE.md` for what it is.
 - **Chip family**: ESP32 only (`library.properties` scopes it to the `esp32` architecture).
   None of the model code is chip-specific, but `DataBuffer`'s `File`-loading path uses
   ESP32's own PSRAM allocator directly, and the multi-megabyte weight/dictionary data needs a

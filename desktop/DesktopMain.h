@@ -77,6 +77,8 @@ class DesktopMain {
     // doc for why (the underlying worker pool is created lazily on first
     // use and persists for the process's lifetime).
     tts_.setNumWorkers(opt.threads);
+    tts_.setDecoderPrecision(opt.decoder_int8 ? tinytts::ops::DecoderPrecision::kInt8Activations
+                                               : tinytts::ops::DecoderPrecision::kFloat32);
 
     bool should_play = !opt.no_play && opt.output_file.empty() && !opt.to_stdout;
     if (should_play) {
@@ -180,6 +182,7 @@ class DesktopMain {
     int speaker = 0;
     int threads = 2;  // matches TinyTTS::setNumWorkers()'s own default
     bool full_dict = false;
+    bool decoder_int8 = false;
     bool help_requested = false;
   };
 
@@ -210,6 +213,14 @@ class DesktopMain {
                   "                        one (still paired with the neural G2P fallback) --\n"
                   "                        see docs/model-data.md for why slimmed+G2P is the\n"
                   "                        recommended default even so.\n"
+                  "  --decoder-precision full|int8\n"
+                  "                        default full. 'int8' quantizes the decoder's conv1d\n"
+                  "                        activations to INT8 for a real INT8xINT8 dot product\n"
+                  "                        -- audibly different (lossier) on ANY platform, but\n"
+                  "                        only actually FASTER on ESP32 (real SIMD there); on\n"
+                  "                        desktop it's the identical quantization math run as\n"
+                  "                        a scalar loop, so it changes quality only, not speed.\n"
+                  "                        See docs/performance.md.\n"
                   "\n"
                   "  -h, --help            Show this help text.\n",
                   prog, prog, prog, std::thread::hardware_concurrency());
@@ -263,6 +274,18 @@ class DesktopMain {
         opt.threads = std::atoi(v);
       } else if (a == "--full-dict") {
         opt.full_dict = true;
+      } else if (a == "--decoder-precision") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        std::string s = v;
+        if (s == "full") {
+          opt.decoder_int8 = false;
+        } else if (s == "int8") {
+          opt.decoder_int8 = true;
+        } else {
+          std::fprintf(stderr, "--decoder-precision must be 'full' or 'int8', got: %s\n", v);
+          return false;
+        }
       } else if (!a.empty() && a[0] == '-' && a != "-") {
         std::fprintf(stderr, "unknown option: %s\n", a.c_str());
         printUsage(argv[0]);

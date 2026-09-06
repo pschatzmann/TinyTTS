@@ -23,7 +23,7 @@
 // command line -- so an angle-bracket include of either upstream header
 // would resolve to whatever (possibly dp_s8-lacking) copy the core
 // bundles, not this directory's. This header is included via a
-// project-relative quoted path ("esp-dsp-dotprod/dsps_dp_s8.h", not
+// project-relative quoted path ("int8-dotprod/dsps_dp_s8.h", not
 // <dsps_dotprod.h>) specifically because a quoted include can't be
 // shadowed that way.
 #include <cstdint>

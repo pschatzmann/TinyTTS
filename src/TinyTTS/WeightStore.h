@@ -120,18 +120,22 @@ class WeightStore {
       for (size_t i = 0; i < n; i++) out[i] = (float)(int8_t)raw[start + i] * scale;
     }
 
-   private:
-    size_t rowSize() const { return count / (size_t)shape[0]; }
-
-    // row_scale may not be 4-byte aligned (it sits right after a
-    // variable-length name + shape header in the buffer) -- memcpy instead
-    // of dereferencing, same reason at()/decodeRun() memcpy raw for
-    // dtype 0/1 rather than casting to a float* directly.
+    /// dtype 2 only: the per-row (dim0) symmetric INT8 scale, undequantized --
+    /// public (unlike decodeRun()/at()) for callers that want to do their own
+    /// INT8xINT8 arithmetic directly on `raw` and rescale the result once at
+    /// the end, instead of dequantizing weights to float first (see Ops.h's
+    /// conv1d() INT8-activation path).
     float rowScale(size_t row) const {
+      // row_scale may not be 4-byte aligned (it sits right after a
+      // variable-length name + shape header in the buffer) -- memcpy instead
+      // of dereferencing, same reason at()/decodeRun() memcpy raw for
+      // dtype 0/1 rather than casting to a float* directly.
       float v;
       std::memcpy(&v, row_scale + row * 4, 4);
       return v;
     }
+
+    size_t rowSize() const { return count / (size_t)shape[0]; }
   };
 
   /// Parses all tensors out of the given buffer (recording pointers into

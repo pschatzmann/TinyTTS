@@ -103,6 +103,14 @@ Voice tuning:
   --full-dict           Use the full CMU dictionary instead of the slimmed one (still
                         paired with the neural G2P fallback) -- see docs/model-data.md
                         for why slimmed+G2P is the recommended default even so.
+  --decoder-precision full|int8
+                        default full. 'int8' quantizes the decoder's conv1d() activations
+                        to INT8 for an INT8xINT8 dot product -- audibly lossier on any
+                        platform. On desktop this is always a scalar loop (quality-only
+                        A/B, not a speed test). On ESP32-S3 it's currently ALSO scalar,
+                        not faster, because the vendored SIMD kernel was found to be
+                        broken on real hardware and is disabled pending a fix -- see
+                        docs/performance.md for the measured numbers and the full story.
 
   -h, --help            Show this help text.
 ```
@@ -125,6 +133,11 @@ cat script.txt | tinytts --stdout | aplay
 
 # Quieter, slower, a different speaker
 tinytts --volume 0.4 --length-scale 1.3 --speaker 2 "Take it slow."
+
+# A/B the INT8-activation decoder prototype (quality only on desktop -- see
+# docs/performance.md; real speed only shows up on ESP32)
+tinytts -o full.wav "Hello world!"
+tinytts --decoder-precision int8 -o int8.wav "Hello world!"
 ```
 
 ## Design notes (why it's built this way)
@@ -173,3 +186,7 @@ tinytts --volume 0.4 --length-scale 1.3 --speaker 2 "Take it slow."
   worker pool (`TileSplitter`, see `docs/performance.md`) is created lazily on first use and
   persists for the process's lifetime -- changing it afterward has no effect. `DesktopMain`
   calls `setNumWorkers()` right after parsing arguments, before `begin()`.
+- **`setDecoderPrecision()`/`--decoder-precision` is read fresh on every `conv1d()` call**
+  (no lazy one-time init like `setNumWorkers()`'s worker pool), but `DesktopMain` still sets
+  it before `begin()`/the first `speak()`, for the same consistent-ordering reason as every
+  other synthesis setting here.

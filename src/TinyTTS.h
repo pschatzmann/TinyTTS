@@ -111,6 +111,15 @@ class TinyTTS {
   /// arduino-audio-tools' Task support available (single-core fallback).
   void setNumWorkers(int n) { ops::setNumWorkers(n); }
 
+  /// Decoder conv1d()'s activation precision -- kFloat32 (default, matches
+  /// today's shipped weights-only-INT8 scheme) or kInt8Activations (a real
+  /// INT8xINT8 dot product, SIMD-accelerated on ESP32, scalar elsewhere --
+  /// see ops::DecoderPrecision's doc in Ops.h for the full explanation and
+  /// docs/performance.md for measured quality/speed numbers). Same
+  /// before-first-speak() ordering rule as setNumWorkers() above -- set it
+  /// before begin()/speak(), since it's read fresh on every conv1d() call.
+  void setDecoderPrecision(ops::DecoderPrecision p) { ops::setDecoderPrecision(p); }
+
   /// Scales the PCM data written to the Print output (begin(Print&)/the
   /// no-arg begin()) -- 1.0 is the model's native (full-scale) loudness,
   /// 0.0 is silence. Perceived loudness is logarithmic, not linear (see

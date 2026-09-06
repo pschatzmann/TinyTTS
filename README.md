@@ -40,7 +40,7 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
 | [`docs/esp-idf.md`](docs/esp-idf.md) | Building TinyTTS as a plain ESP-IDF component instead of an Arduino library. |
 | [`docs/desktop.md`](docs/desktop.md) | The `desktop/` CLI (`tinytts`) -- building, installing, running, Unix piping. |
 | [`docs/performance.md`](docs/performance.md) | Real-hardware optimization history: what worked, what didn't, and why. |
-| [`docs/realtime-audio-approaches.md`](docs/realtime-audio-approaches.md) | Approaches evaluated for moving TinyTTS closer to real-time synthesis. |
+| [`docs/potential-improvements.md`](docs/potential-improvements.md) | What's still open for moving TinyTTS closer to real-time synthesis. |
 | [`docs/text-input.md`](docs/text-input.md) | What you can pass to `speak()`, and the one real constraint on splitting text across calls. |
 | [`docs/limitations.md`](docs/limitations.md) | Status and known limitations. |
 | [`docs/research.md`](docs/research.md) | The offline Python tooling (`research/`) used to investigate, export, and validate the model. |

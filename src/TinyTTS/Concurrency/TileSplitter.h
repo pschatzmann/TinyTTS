@@ -82,17 +82,32 @@ class TileSplitter {
   // today's original behavior: one extra worker). stackSizeWords/priority
   // match audio_tools::Task's constructor -- see that class's own doc for
   // what each means on ESP32 vs desktop (stackSizeWords is words, not
-  // bytes). The first extra worker is pinned to core 1 (ESP32's second
-  // real core, assuming the calling thread runs on core 0 as Arduino
-  // sketches normally do); any further workers (num_workers > 2) are left
-  // unpinned (-1, scheduler's choice) since ESP32 has no third core to pin
-  // to -- meaningful parallelism beyond 2 is a desktop-only case anyway.
+  // bytes). The first extra worker is pinned to whichever of ESP32's two
+  // real cores the CALLING thread is NOT already on -- determined at
+  // runtime via xPortGetCoreID(), not hardcoded to core 1. An earlier
+  // version of this file hardcoded core 1 "assuming the calling thread
+  // runs on core 0 as Arduino sketches normally do" -- that assumption was
+  // simply wrong and went unnoticed until real-hardware measurement showed
+  // zero speedup from 2 workers (see docs/performance.md): Arduino-ESP32's
+  // own core/main.cpp pins the sketch's main task (loopTask, where
+  // setup()/loop()/every speak() call actually runs) to
+  // ARDUINO_RUNNING_CORE, which defaults to 1, not 0 -- so the "worker on
+  // core 1" was landing on the exact same physical core as the caller the
+  // whole time, just adding task-switch overhead with no real parallelism.
+  // Any further workers (num_workers > 2) are left unpinned (-1,
+  // scheduler's choice) since ESP32 has no third core to pin to --
+  // meaningful parallelism beyond 2 is a desktop-only case anyway.
   explicit TileSplitter(int num_workers = 2, int stackSizeWords = 4096, int priority = 1) {
 #ifdef TINYTTS_HAVE_TASK
     int extra = num_workers > 1 ? num_workers - 1 : 0;
     workers_.reserve(extra);
+#if defined(ESP32)
+    int other_core = 1 - xPortGetCoreID();
+#else
+    int other_core = 1;  // desktop: std::thread-backed Task, no real core-affinity API used here
+#endif
     for (int i = 0; i < extra; i++) workers_.push_back(std::unique_ptr<WorkerSlot>(
-        new WorkerSlot(stackSizeWords, priority, i == 0 ? 1 : -1)));
+        new WorkerSlot(stackSizeWords, priority, i == 0 ? other_core : -1)));
 #else
     (void)num_workers;
     (void)stackSizeWords;

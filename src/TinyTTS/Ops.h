@@ -1,24 +1,30 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <vector>
 
+#include "TinyTTS/AlignedStlAllocator.h"
 #include "TinyTTS/Concurrency/TileSplitter.h"
 #include "TinyTTS/InternalStlAllocator.h"
 #include "TinyTTS/Mat.h"
+#include "TinyTTS/PsramStlAllocator.h"
 #include "TinyTTS/WeightStore.h"
 
-// Optional: esp-dsp's SIMD-accelerated float32 dot product (PIE instructions
-// on ESP32-S3/P4, generic-optimized elsewhere in the ESP32 family). Only
-// dsps_dotprod.h (not the esp_dsp.h umbrella, which pulls in ~15 unrelated
-// modules -- FFT/FIR/biquad/etc -- none of which this project needs) --
-// see src/esp-dsp-dotprod/NOTICE.md (a minimal vendored copy of just the
-// dotprod/mulc/add modules, since upstream github.com/espressif/esp-dsp is
-// an ESP-IDF component arduino-cli can't load directly: "invalid library:
-// no header files found"). Lives directly under this library's own src/
-// tree (not a separate library a sketch has to install by hand) so
-// Arduino's normal recursive src/ header discovery finds it automatically
-// on any ESP32-family board -- no extra install step. Still guarded by
+// Optional: SIMD-accelerated dot products for ESP32-S3/P4. Float32
+// (dsps_dotprod_f32/dsps_dotprode_f32/dsps_mulc_f32/dsps_add_f32) comes
+// from the Arduino-ESP32 core's OWN bundled esp-dsp component (~3.3.x+
+// cores ship one) -- found automatically via <dsps_dotprod.h>/<dsps_mulc.h>/
+// <dsps_add.h>, nothing to vendor for that part. INT8
+// (tinytts::dspsDotProdS8, used by conv1d()'s INT8-activation path) is
+// vendored in src/int8-dotprod/ instead, via a quoted, project-relative
+// include, NOT <dsps_dotprod.h> -- the core's bundled component doesn't
+// declare dsps_dp_s8 at all, and even if it did, an angle-bracket include
+// from this file would resolve to the core's copy (its include dirs
+// precede this library's own src/ on the compiler command line), not
+// whatever this project vendors -- see src/int8-dotprod/NOTICE.md and
+// dsps_dp_s8.h's own doc for the full story. Still guarded by
 // __has_include rather than a hard library.properties dependency, so a
 // host/desktop build still compiles and just uses the plain scalar loop
 // below.
@@ -26,6 +32,7 @@
 #include <dsps_dotprod.h>
 #include <dsps_mulc.h>
 #include <dsps_add.h>
+#include "int8-dotprod/dsps_dp_s8.h"
 #define TINYTTS_HAVE_ESP_DSP 1
 #endif
 
@@ -137,6 +144,31 @@ inline int numWorkers() {
 #endif
 }
 
+/// `conv1d()`'s activation precision -- kFloat32 (default) matches every
+/// other op in this file; kInt8Activations quantizes activations to INT8
+/// per-timestep (symmetric, abs-max/127) and does a real INT8xINT8 dot
+/// product against the already-INT8 decoder weights (dtype 2, see
+/// WeightStore.h), rescaling the int32 result back to float once at the
+/// end -- a genuine speed/quality tradeoff, not just weights-only
+/// quantization's float-activation scheme. Only `conv1d()` honors this
+/// (see its own doc for why `convTranspose1d()` doesn't: its scatter
+/// pattern has no single dot-product primitive to swap in). On ESP32
+/// (TINYTTS_HAVE_ESP_DSP), the dot product itself runs as real SIMD
+/// (dsps_dp_s8); everywhere else it's the identical quantization math via
+/// a plain scalar loop -- same audible quality tradeoff, just not the
+/// speed one (see docs/desktop.md).
+enum class DecoderPrecision { kFloat32, kInt8Activations };
+
+namespace detail {
+inline DecoderPrecision& decoderPrecisionRef() {
+  static DecoderPrecision p = DecoderPrecision::kFloat32;
+  return p;
+}
+}  // namespace detail
+
+inline void setDecoderPrecision(DecoderPrecision p) { detail::decoderPrecisionRef() = p; }
+inline DecoderPrecision decoderPrecision() { return detail::decoderPrecisionRef(); }
+
 /// The one TileSplitter shared by conv1d() and convTranspose1d() -- they're
 /// never called concurrently with each other (one sequential synthesis
 /// pipeline, stage by stage), so sharing a single pool avoids paying for
@@ -165,56 +197,180 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
   size_t row_size = (size_t)cin * k;
   int num_tiles = (cout + kWeightTileRows - 1) / kWeightTileRows;
 
+  // Only decoder conv weights are ever dtype 2 (see WeightStore.h), but
+  // check it explicitly rather than assume -- this op is generic.
+  bool use_int8 = decoderPrecision() == DecoderPrecision::kInt8Activations && w.dtype == 2;
+
+  // cin padded up to a multiple of kSimdAlign (16) with zero bytes --
+  // lets the INT8 SIMD kernel (esp_nn_dot_s8_aligned_esp32s3, see
+  // src/int8-dotprod/) always run over a full 16-multiple length, no
+  // separate remainder/tail path needed: zero-valued padding elements
+  // don't change a dot product's result. Both xq (below) and wtile_i8
+  // (in the tile lambda) are laid out with this padded stride.
+  int cin_padded = use_int8 ? (int)(((size_t)cin + kSimdAlign - 1) / kSimdAlign * kSimdAlign) : cin;
+
+  // Quantize x once, per-timestep (row) -- not per-tensor, and not redone
+  // per weight tile -- before entering the tile loop below. Per-row (not
+  // the historical experiment's per-tensor scale, see docs/performance.md)
+  // costs nothing extra here since this loop is already row-major; doing
+  // it once up front (rather than implicitly once per tile, the way the
+  // float32 path re-reads x from PSRAM per tile) avoids num_tiles-fold
+  // redundant quantization work.
+  //
+  // AlignedPsramVector, NOT PsramVector/InternalVector -- two distinct
+  // requirements: (1) PSRAM, not internal RAM (InternalVector means
+  // on-chip internal SRAM specifically, only ~300KB total -- using it
+  // here once crashed hard on real ESP32-S3 hardware, std::bad_alloc
+  // resizing to a mere 128KB, once T got large enough; xq/x_scale scale
+  // with T, the full frame count, unlike wtile/wtile_i8's fixed
+  // per-layer-channel-count size); (2) 16-byte pointer alignment --
+  // esp_nn_dot_s8_aligned_esp32s3 requires it (undefined behavior
+  // otherwise, it's a 128-bit vector load), which plain PsramVector's
+  // heap_caps_malloc doesn't guarantee. See AlignedStlAllocator.h.
+  //
+  // function-local static, not a fresh alloc/free every call: conv1d() is
+  // called many times per synthesis (once per decoder layer), so this
+  // avoids that many PSRAM alloc/free cycles on top of the existing
+  // per-tile wtile churn. Safe as a static despite conv1d() participating
+  // in TileSplitter's parallel tile loop below: these are computed once,
+  // sequentially, BEFORE that parallel section starts, and only ever read
+  // (never written) from within it -- unlike wtile/wtile_i8 below, which
+  // genuinely must stay per-participant-local (see their own doc).
+  static AlignedPsramVector<int8_t> xq;
+  static PsramVector<float> x_scale;  // plain PsramVector: never touched by the SIMD kernel, no alignment need
+  if (use_int8) {
+    xq.resize((size_t)T * cin_padded);
+    x_scale.resize((size_t)T);
+    int pad_cols = cin_padded - cin;
+    for (int t = 0; t < T; t++) {
+      const float* xr = x.row(t);
+      float m = 0.0f;
+      for (int ci = 0; ci < cin; ci++) m = std::max(m, std::fabs(xr[ci]));
+      float s = std::max(m, 1e-8f) / 127.0f;
+      x_scale[t] = s;
+      int8_t* qr = xq.data() + (size_t)t * cin_padded;
+      for (int ci = 0; ci < cin; ci++) {
+        int q = (int)std::lround(xr[ci] / s);
+        qr[ci] = (int8_t)std::max(-127, std::min(127, q));
+      }
+      // xq is a persistent static buffer reused (not re-zeroed) across
+      // calls with DIFFERENT cin_padded strides -- explicitly zero the
+      // pad columns every time rather than relying on leftover state
+      // from a previous, differently-shaped layer's use.
+      if (pad_cols > 0) std::memset(qr + cin, 0, (size_t)pad_cols);
+    }
+  }
+
   // Each output channel co is written by exactly one tile, so splitting the
   // tile range across two workers (see TileSplitter) writes disjoint
   // columns of y -- no race, as long as each half decodes its weight rows
   // into its OWN wtile rather than a buffer shared between them (hence
   // wtile being local to this lambda, not a shared static, when running
   // split -- see TileSplitter's doc for why that matters).
+  size_t row_size_i8 = (size_t)cin_padded * k;  // wtile_i8's per-output-row size (padded stride), vs. row_size (cin*k, unpadded, used to index w.raw)
   auto tileRange = [&](int tile0, int tile1) {
     InternalVector<float> wtile;
-    wtile.resize((size_t)kWeightTileRows * row_size);
+    // INT8 path only: the tile's weights, reshaped from the raw [cin,k]
+    // interleaved layout into k separate CONTIGUOUS, zero-padded (to
+    // cin_padded) [cin_padded] arrays -- esp_nn_dot_s8_aligned_esp32s3
+    // (unlike dsps_dotprode_f32) has no strided/step variant and requires
+    // a length that's a multiple of 16, so this reshape+pad is what makes
+    // a single SIMD dot-product call per tap possible at all. Read
+    // straight from w.raw (no float dequant at all, unlike decodeRun() --
+    // cheaper than the float32 path, not just different). AlignedInternal-
+    // Vector, not InternalVector: same 16-byte-alignment requirement as
+    // xq above, see AlignedStlAllocator.h. A fresh vector each tileRange()
+    // call (per-participant, not static -- see this lambda's own doc), so
+    // resize()'s zero-initialization already covers the padding columns,
+    // no explicit memset needed here (unlike xq, which is static/reused).
+    AlignedInternalVector<int8_t> wtile_i8;
+    if (use_int8) {
+      wtile_i8.resize((size_t)kWeightTileRows * row_size_i8);
+    } else {
+      wtile.resize((size_t)kWeightTileRows * row_size);
+    }
     const float* xrows[kMaxKernelSize];
+    const int8_t* xqrows[kMaxKernelSize];
     for (int tile = tile0; tile < tile1; tile++) {
       int co0 = tile * kWeightTileRows;
       int tile_rows = std::min(kWeightTileRows, cout - co0);
-      for (int r = 0; r < tile_rows; r++)
-        w.decodeRun((size_t)(co0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
+      if (use_int8) {
+        for (int r = 0; r < tile_rows; r++) {
+          int co = co0 + r;
+          for (int kk = 0; kk < k; kk++) {
+            int8_t* dst = wtile_i8.data() + (size_t)r * row_size_i8 + (size_t)kk * cin_padded;
+            for (int ci = 0; ci < cin; ci++) dst[ci] = (int8_t)w.raw[(size_t)co * row_size + (size_t)ci * k + kk];
+            // dst[cin..cin_padded) stays zero (fresh vector, see above).
+          }
+        }
+      } else {
+        for (int r = 0; r < tile_rows; r++)
+          w.decodeRun((size_t)(co0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
+      }
 
       for (int t = 0; t < T; t++) {
         for (int kk = 0; kk < k; kk++) {
           int ti = t + kk * dilation - pad;
-          xrows[kk] = (ti < 0 || ti >= T) ? nullptr : x.row(ti);
+          bool valid = ti >= 0 && ti < T;
+          xrows[kk] = valid ? x.row(ti) : nullptr;
+          xqrows[kk] = (use_int8 && valid) ? xq.data() + (size_t)ti * cin_padded : nullptr;
         }
         float* yr = y.row(t);
         for (int r = 0; r < tile_rows; r++) {
           int co = co0 + r;
           float acc = bias.empty() ? 0.0f : bias[co];
-          const float* wrow = wtile.data() + (size_t)r * row_size;  // [cin, k]
+          if (use_int8) {
+            const int8_t* wrow = wtile_i8.data() + (size_t)r * row_size_i8;  // [k][cin_padded], contiguous per tap
+            float wscale = w.rowScale(co);
+            for (int kk = 0; kk < k; kk++) {
+              if (!xqrows[kk]) continue;
+              int32_t dot = 0;
 #ifdef TINYTTS_HAVE_ESP_DSP
-          // Per kernel tap kk: dot(xrows[kk][0..cin), wrow[ci*k+kk] for
-          // ci in [0..cin)) -- the weight side isn't contiguous (stride k
-          // within a [cin,k] row), so this uses dsps_dotprode_f32's step2
-          // rather than needing to transpose the tile layout. Every real
-          // implementation of dsps_dotprod(e)_f32 (ansi/ae32/aes3, checked
-          // directly in the vendored source) does `*dest = acc` -- an
-          // overwrite, not the "*dest += ..." upstream's doc comment
-          // claims -- so each kk's partial dot goes into a scratch var and
-          // gets added to acc explicitly; passing &acc straight through
-          // would silently drop the bias and every kk but the last.
-          for (int kk = 0; kk < k; kk++) {
-            if (!xrows[kk]) continue;
-            float dot = 0.0f;
-            dsps_dotprode_f32(xrows[kk], wrow + kk, &dot, cin, 1, k);
-            acc += dot;
-          }
+              // Real INT8 SIMD on ESP32-S3 (esp_nn_dot_s8_aligned_esp32s3,
+              // ported from espressif/esp-nn -- see dsps_dp_s8.h/NOTICE.md
+              // for why this project rolled its own instead of trusting
+              // esp-dsp's own dsps_dp_s8_aes3, which was found broken on
+              // real hardware). Scalar ansi fallback elsewhere (e.g.
+              // ESP32-P4, or if the alignment/length preconditions this
+              // op guarantees ever stop holding).
+              dspsDotProdS8(xqrows[kk], wrow + (size_t)kk * cin_padded, &dot, cin_padded);
 #else
-          for (int ci = 0; ci < cin; ci++) {
-            const float* wk = wrow + (size_t)ci * k;
-            for (int kk = 0; kk < k; kk++)
-              if (xrows[kk]) acc += xrows[kk][ci] * wk[kk];
-          }
+              // Desktop/other: identical quantization math, scalar loop --
+              // same audible quality tradeoff as the SIMD path, just not
+              // the speed one (real SIMD only compiles for ESP32-S3).
+              const int8_t* wk = wrow + (size_t)kk * cin_padded;
+              for (int ci = 0; ci < cin; ci++) dot += (int32_t)xqrows[kk][ci] * (int32_t)wk[ci];
 #endif
+              int ti = t + kk * dilation - pad;
+              acc += (float)dot * x_scale[ti] * wscale;
+            }
+          } else {
+            const float* wrow = wtile.data() + (size_t)r * row_size;  // [cin, k]
+#ifdef TINYTTS_HAVE_ESP_DSP
+            // Per kernel tap kk: dot(xrows[kk][0..cin), wrow[ci*k+kk] for
+            // ci in [0..cin)) -- the weight side isn't contiguous (stride k
+            // within a [cin,k] row), so this uses dsps_dotprode_f32's step2
+            // rather than needing to transpose the tile layout. Every real
+            // implementation of dsps_dotprod(e)_f32 (ansi/ae32/aes3, checked
+            // directly in the vendored source) does `*dest = acc` -- an
+            // overwrite, not the "*dest += ..." upstream's doc comment
+            // claims -- so each kk's partial dot goes into a scratch var and
+            // gets added to acc explicitly; passing &acc straight through
+            // would silently drop the bias and every kk but the last.
+            for (int kk = 0; kk < k; kk++) {
+              if (!xrows[kk]) continue;
+              float dot = 0.0f;
+              dsps_dotprode_f32(xrows[kk], wrow + kk, &dot, cin, 1, k);
+              acc += dot;
+            }
+#else
+            for (int ci = 0; ci < cin; ci++) {
+              const float* wk = wrow + (size_t)ci * k;
+              for (int kk = 0; kk < k; kk++)
+                if (xrows[kk]) acc += xrows[kk][ci] * wk[kk];
+            }
+#endif
+          }
           yr[co] = acc;
         }
       }
