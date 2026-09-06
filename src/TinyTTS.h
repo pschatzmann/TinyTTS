@@ -101,6 +101,16 @@ class TinyTTS {
   void setNoiseScale(float noise_scale) { noise_scale_ = noise_scale; }
   void setLengthScale(float length_scale) { length_scale_ = length_scale; }
 
+  /// How many participants (calling thread + workers) the decoder's hot
+  /// conv1d()/convTranspose1d() loops split across -- see
+  /// ops::setNumWorkers()'s doc (Ops.h) for the full explanation, most
+  /// importantly: this must be called before the first speak()/synthesize()
+  /// call, since the underlying worker pool is created lazily on first use
+  /// and persists for the process/device lifetime -- calling this after
+  /// synthesis has already started has no effect. No-op on a build without
+  /// arduino-audio-tools' Task support available (single-core fallback).
+  void setNumWorkers(int n) { ops::setNumWorkers(n); }
+
   /// Scales the PCM data written to the Print output (begin(Print&)/the
   /// no-arg begin()) -- 1.0 is the model's native (full-scale) loudness,
   /// 0.0 is silence. Perceived loudness is logarithmic, not linear (see

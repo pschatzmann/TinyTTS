@@ -45,7 +45,13 @@ inline void timingLog(const char* fmt, Args... args) {
 #ifdef ARDUINO
   Serial.printf(fmt, args...);
 #else
-  printf(fmt, args...);
+  // stderr, not stdout: a host build (e.g. desktop/DesktopMain.h) may write
+  // real audio data to stdout for piping (`tinytts_desktop ... --stdout |
+  // aplay`) -- these are diagnostics, not program output, and must never
+  // interleave with that byte stream. Matches Unix convention (data on
+  // stdout, diagnostics on stderr) regardless of whether a given build
+  // actually uses stdout for anything.
+  fprintf(stderr, fmt, args...);
 #endif
 }
 

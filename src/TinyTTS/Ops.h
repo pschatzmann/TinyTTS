@@ -3,6 +3,7 @@
 #include <cmath>
 #include <vector>
 
+#include "TinyTTS/Concurrency/TileSplitter.h"
 #include "TinyTTS/InternalStlAllocator.h"
 #include "TinyTTS/Mat.h"
 #include "TinyTTS/WeightStore.h"
@@ -102,6 +103,53 @@ constexpr int kMaxKernelSize = 64;
 // than once per output timestep.
 constexpr int kWeightTileRows = 8;
 
+#ifdef TINYTTS_HAVE_TASK
+namespace detail {
+inline int& numWorkersRef() {
+  static int n = 2;  // matches ESP32's two real cores
+  return n;
+}
+}  // namespace detail
+#endif
+
+/// How many participants (calling thread + workers) conv1d()/
+/// convTranspose1d() split their tile loop across via the shared
+/// TileSplitter (sharedSplitter(), below) -- 2 (default) matches ESP32's
+/// two real physical cores; on desktop this can be raised to use more.
+/// Must be called before the first synthesize() call: sharedSplitter()'s
+/// worker pool is created lazily on first use and persists for the
+/// process/device lifetime (see TileSplitter's own doc for why), so
+/// changing this afterward has no effect. No-op when TINYTTS_HAVE_TASK
+/// isn't defined (a single-core build has nothing to configure).
+inline void setNumWorkers(int n) {
+#ifdef TINYTTS_HAVE_TASK
+  detail::numWorkersRef() = n;
+#else
+  (void)n;
+#endif
+}
+
+inline int numWorkers() {
+#ifdef TINYTTS_HAVE_TASK
+  return detail::numWorkersRef();
+#else
+  return 1;
+#endif
+}
+
+/// The one TileSplitter shared by conv1d() and convTranspose1d() -- they're
+/// never called concurrently with each other (one sequential synthesis
+/// pipeline, stage by stage), so sharing a single pool avoids paying for
+/// 2x the worker tasks two separate pools would otherwise need.
+inline TileSplitter& sharedSplitter() {
+  static TileSplitter splitter(numWorkers());
+  return splitter;
+}
+
+// Forward-declared: defined further below, but convTranspose1d() (just
+// below conv1d()) needs it to merge its per-participant accumulators.
+inline void addInplace(Mat& a, const Mat& b);
+
 /// General Conv1d, weight shape [Cout, Cin, K], "same" padding
 /// (pad=dilation*(K-1)/2, K odd), stride 1. Tiles over Cout in
 /// kWeightTileRows-row chunks (see that constant's doc): each output
@@ -115,54 +163,65 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
   int T = x.rows();
   Mat y(T, cout);
   size_t row_size = (size_t)cin * k;
+  int num_tiles = (cout + kWeightTileRows - 1) / kWeightTileRows;
 
-  static InternalVector<float> wtile;  // not reentrant/thread-safe -- fine, this project is single-threaded
-  wtile.resize((size_t)kWeightTileRows * row_size);
+  // Each output channel co is written by exactly one tile, so splitting the
+  // tile range across two workers (see TileSplitter) writes disjoint
+  // columns of y -- no race, as long as each half decodes its weight rows
+  // into its OWN wtile rather than a buffer shared between them (hence
+  // wtile being local to this lambda, not a shared static, when running
+  // split -- see TileSplitter's doc for why that matters).
+  auto tileRange = [&](int tile0, int tile1) {
+    InternalVector<float> wtile;
+    wtile.resize((size_t)kWeightTileRows * row_size);
+    const float* xrows[kMaxKernelSize];
+    for (int tile = tile0; tile < tile1; tile++) {
+      int co0 = tile * kWeightTileRows;
+      int tile_rows = std::min(kWeightTileRows, cout - co0);
+      for (int r = 0; r < tile_rows; r++)
+        w.decodeRun((size_t)(co0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
 
-  const float* xrows[kMaxKernelSize];
-  for (int co0 = 0; co0 < cout; co0 += kWeightTileRows) {
-    int tile_rows = std::min(kWeightTileRows, cout - co0);
-    for (int r = 0; r < tile_rows; r++)
-      w.decodeRun((size_t)(co0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
-
-    for (int t = 0; t < T; t++) {
-      for (int kk = 0; kk < k; kk++) {
-        int ti = t + kk * dilation - pad;
-        xrows[kk] = (ti < 0 || ti >= T) ? nullptr : x.row(ti);
-      }
-      float* yr = y.row(t);
-      for (int r = 0; r < tile_rows; r++) {
-        int co = co0 + r;
-        float acc = bias.empty() ? 0.0f : bias[co];
-        const float* wrow = wtile.data() + (size_t)r * row_size;  // [cin, k]
-#ifdef TINYTTS_HAVE_ESP_DSP
-        // Per kernel tap kk: dot(xrows[kk][0..cin), wrow[ci*k+kk] for
-        // ci in [0..cin)) -- the weight side isn't contiguous (stride k
-        // within a [cin,k] row), so this uses dsps_dotprode_f32's step2
-        // rather than needing to transpose the tile layout. Every real
-        // implementation of dsps_dotprod(e)_f32 (ansi/ae32/aes3, checked
-        // directly in the vendored source) does `*dest = acc` -- an
-        // overwrite, not the "*dest += ..." upstream's doc comment
-        // claims -- so each kk's partial dot goes into a scratch var and
-        // gets added to acc explicitly; passing &acc straight through
-        // would silently drop the bias and every kk but the last.
+      for (int t = 0; t < T; t++) {
         for (int kk = 0; kk < k; kk++) {
-          if (!xrows[kk]) continue;
-          float dot = 0.0f;
-          dsps_dotprode_f32(xrows[kk], wrow + kk, &dot, cin, 1, k);
-          acc += dot;
+          int ti = t + kk * dilation - pad;
+          xrows[kk] = (ti < 0 || ti >= T) ? nullptr : x.row(ti);
         }
+        float* yr = y.row(t);
+        for (int r = 0; r < tile_rows; r++) {
+          int co = co0 + r;
+          float acc = bias.empty() ? 0.0f : bias[co];
+          const float* wrow = wtile.data() + (size_t)r * row_size;  // [cin, k]
+#ifdef TINYTTS_HAVE_ESP_DSP
+          // Per kernel tap kk: dot(xrows[kk][0..cin), wrow[ci*k+kk] for
+          // ci in [0..cin)) -- the weight side isn't contiguous (stride k
+          // within a [cin,k] row), so this uses dsps_dotprode_f32's step2
+          // rather than needing to transpose the tile layout. Every real
+          // implementation of dsps_dotprod(e)_f32 (ansi/ae32/aes3, checked
+          // directly in the vendored source) does `*dest = acc` -- an
+          // overwrite, not the "*dest += ..." upstream's doc comment
+          // claims -- so each kk's partial dot goes into a scratch var and
+          // gets added to acc explicitly; passing &acc straight through
+          // would silently drop the bias and every kk but the last.
+          for (int kk = 0; kk < k; kk++) {
+            if (!xrows[kk]) continue;
+            float dot = 0.0f;
+            dsps_dotprode_f32(xrows[kk], wrow + kk, &dot, cin, 1, k);
+            acc += dot;
+          }
 #else
-        for (int ci = 0; ci < cin; ci++) {
-          const float* wk = wrow + (size_t)ci * k;
-          for (int kk = 0; kk < k; kk++)
-            if (xrows[kk]) acc += xrows[kk][ci] * wk[kk];
-        }
+          for (int ci = 0; ci < cin; ci++) {
+            const float* wk = wrow + (size_t)ci * k;
+            for (int kk = 0; kk < k; kk++)
+              if (xrows[kk]) acc += xrows[kk][ci] * wk[kk];
+          }
 #endif
-        yr[co] = acc;
+          yr[co] = acc;
+        }
       }
     }
-  }
+  };
+
+  sharedSplitter().run(num_tiles, [&](int tile0, int tile1, int /*participant*/) { tileRange(tile0, tile1); });
   return y;
 }
 
@@ -187,59 +246,92 @@ inline Mat convTranspose1d(const Mat& x, const WeightStore::Entry& w, const std:
     for (int t = 0; t < t_out_len; t++) y.at(t, co) = b;
   }
   size_t row_size = (size_t)cout * k;
+  int num_tiles = (cin + kWeightTileRows - 1) / kWeightTileRows;
 
-  static InternalVector<float> wtile;  // not reentrant/thread-safe -- fine, this project is single-threaded
-  wtile.resize((size_t)kWeightTileRows * row_size);
+  // Unlike conv1d's per-output-channel gather (independent, disjoint
+  // writes), this op's inner loop scatters read-modify-write additions
+  // into `acc` (yrows[kk][co] += ...) -- every ci tile can touch the same
+  // (t_out, co) cell, since that's the whole point of a transposed-conv
+  // scatter. Splitting the ci tile range across two workers writing into
+  // the SAME Mat would be a genuine, silent, nondeterministic lost-update
+  // race (worse than this project's earlier silent-corruption bugs,
+  // because scheduling-dependent nondeterminism could pass a sanity check
+  // on some runs and not others). So each half accumulates into its own
+  // private, zero-initialized (no bias) Mat instead, merged into the real,
+  // already-bias-initialized `y` via addInplace() once both finish.
+  auto tileRange = [&](Mat& acc, int tile0, int tile1) {
+    InternalVector<float> wtile;
+    wtile.resize((size_t)kWeightTileRows * row_size);
 #ifdef TINYTTS_HAVE_ESP_DSP
-  // Scratch for the mulc+add two-step below (see its doc). cout-sized,
-  // tiny (largest in this model is a few hundred floats).
-  static InternalVector<float> scaled;
-  scaled.resize((size_t)cout);
+    // Scratch for the mulc+add two-step below (see its doc). cout-sized,
+    // tiny (largest in this model is a few hundred floats).
+    InternalVector<float> scaled;
+    scaled.resize((size_t)cout);
 #endif
+    float* yrows[kMaxKernelSize];
+    for (int tile = tile0; tile < tile1; tile++) {
+      int ci0 = tile * kWeightTileRows;
+      int tile_rows = std::min(kWeightTileRows, cin - ci0);
+      for (int r = 0; r < tile_rows; r++)
+        w.decodeRun((size_t)(ci0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
 
-  float* yrows[kMaxKernelSize];
-  for (int ci0 = 0; ci0 < cin; ci0 += kWeightTileRows) {
-    int tile_rows = std::min(kWeightTileRows, cin - ci0);
-    for (int r = 0; r < tile_rows; r++)
-      w.decodeRun((size_t)(ci0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
-
-    for (int ti = 0; ti < x.rows(); ti++) {
-      const float* xr = x.row(ti);
-      for (int kk = 0; kk < k; kk++) {
-        int t_out = ti * stride - padding + kk;
-        yrows[kk] = (t_out < 0 || t_out >= t_out_len) ? nullptr : y.row(t_out);
-      }
-      for (int r = 0; r < tile_rows; r++) {
-        int ci = ci0 + r;
-        float xv = xr[ci];
-        const float* wrow = wtile.data() + (size_t)r * row_size;  // [cout, k]
-#ifdef TINYTTS_HAVE_ESP_DSP
-        // This op scatters (yrows[kk][co] += xv*w[co,kk]), unlike
-        // conv1d's gather, so there's no single dot-product primitive
-        // for it. esp-dsp has no float32 multiply-accumulate op either
-        // (checked the vendored source directly, same way the dotprod
-        // overwrite-vs-accumulate bug was found -- not trusting doc
-        // comments alone this time), so this is two SIMD calls instead
-        // of one: scale w[:,kk] by xv into `scaled` (dsps_mulc_f32,
-        // strided read since w's row is [cout,k]), then add that into
-        // yrows[kk] in place (dsps_add_f32) -- both are plain elementwise
-        // overwrites of their output, confirmed against the assembly, so
-        // no accumulate-semantics trap here.
+      for (int ti = 0; ti < x.rows(); ti++) {
+        const float* xr = x.row(ti);
         for (int kk = 0; kk < k; kk++) {
-          if (!yrows[kk]) continue;
-          dsps_mulc_f32(wrow + kk, scaled.data(), cout, xv, k, 1);
-          dsps_add_f32(yrows[kk], scaled.data(), yrows[kk], cout, 1, 1, 1);
+          int t_out = ti * stride - padding + kk;
+          yrows[kk] = (t_out < 0 || t_out >= t_out_len) ? nullptr : acc.row(t_out);
         }
+        for (int r = 0; r < tile_rows; r++) {
+          int ci = ci0 + r;
+          float xv = xr[ci];
+          const float* wrow = wtile.data() + (size_t)r * row_size;  // [cout, k]
+#ifdef TINYTTS_HAVE_ESP_DSP
+          // This op scatters (yrows[kk][co] += xv*w[co,kk]), unlike
+          // conv1d's gather, so there's no single dot-product primitive
+          // for it. esp-dsp has no float32 multiply-accumulate op either
+          // (checked the vendored source directly, same way the dotprod
+          // overwrite-vs-accumulate bug was found -- not trusting doc
+          // comments alone this time), so this is two SIMD calls instead
+          // of one: scale w[:,kk] by xv into `scaled` (dsps_mulc_f32,
+          // strided read since w's row is [cout,k]), then add that into
+          // yrows[kk] in place (dsps_add_f32) -- both are plain elementwise
+          // overwrites of their output, confirmed against the assembly, so
+          // no accumulate-semantics trap here.
+          for (int kk = 0; kk < k; kk++) {
+            if (!yrows[kk]) continue;
+            dsps_mulc_f32(wrow + kk, scaled.data(), cout, xv, k, 1);
+            dsps_add_f32(yrows[kk], scaled.data(), yrows[kk], cout, 1, 1, 1);
+          }
 #else
-        for (int co = 0; co < cout; co++) {
-          const float* wk = wrow + (size_t)co * k;
-          for (int kk = 0; kk < k; kk++)
-            if (yrows[kk]) yrows[kk][co] += xv * wk[kk];
-        }
+          for (int co = 0; co < cout; co++) {
+            const float* wk = wrow + (size_t)co * k;
+            for (int kk = 0; kk < k; kk++)
+              if (yrows[kk]) yrows[kk][co] += xv * wk[kk];
+          }
 #endif
+        }
       }
     }
+  };
+
+#ifdef TINYTTS_HAVE_TASK
+  TileSplitter& splitter = sharedSplitter();
+  int n = splitter.participantsFor(num_tiles);
+  if (n > 1) {
+    // One private, zero-initialized (no bias -- Mat's ctor fills with
+    // 0.0f by default) accumulator per participant, indexed by the
+    // `participant` TileSplitter hands to the callback -- see this
+    // function's own doc above for why a shared accumulator would race.
+    std::vector<Mat> accs;
+    accs.reserve(n);
+    for (int i = 0; i < n; i++) accs.emplace_back(t_out_len, cout);
+    splitter.run(num_tiles,
+                 [&](int tile0, int tile1, int participant) { tileRange(accs[participant], tile0, tile1); });
+    for (int i = 0; i < n; i++) addInplace(y, accs[i]);
+    return y;
   }
+#endif
+  tileRange(y, 0, num_tiles);
   return y;
 }
 
