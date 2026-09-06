@@ -62,6 +62,18 @@ target_link_libraries(tinytts_desktop PRIVATE Threads::Threads ${CMAKE_DL_LIBS} 
 # C++ link step does.
 target_link_libraries(tinytts_desktop PRIVATE atomic)
 
+# Raspberry Pi Zero (W)/Pi 1 (ARM1176JZF-S, ARMv6, armv6l) default to a
+# generic soft-float-ish ARM target unless told otherwise, missing the
+# chip's actual VFPv2 hardware FPU -- this matters a lot here since the
+# vocoder/decoder stage is dominated by scalar float conv1d loops (no
+# NEON exists on ARMv6 to vectorize with instead). Scoped to armv6l
+# specifically so it doesn't mis-tune armv7/aarch64 Pi boards (2/3/4/5),
+# which have their own (better) NEON-capable cores.
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "armv6l")
+  target_compile_options(tinytts_desktop PRIVATE
+    -mcpu=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -funsafe-math-optimizations)
+endif()
+
 # Without this, `cmake --install`/`make install` silently installs nothing
 # of ours at all (only arduino-audio-tools' own headers, as an incidental
 # side effect of its unrelated install() rules) -- there's no default
