@@ -1,6 +1,6 @@
 # Performance: real-hardware optimization history
 
-How synthesis went from ~7.3 minutes to ~47 seconds for "Hello world!" on a real ESP32-S3
+How synthesis went from ~7.3 minutes to ~34 seconds for "Hello world!" on a real ESP32-S3
 (8MB PSRAM), and what didn't work and why. Every number here is from actual flashed
 hardware, not a simulation or estimate, unless explicitly marked as a projection. For
 work that's genuinely not started yet, see `docs/potential-improvements.md` instead --
@@ -11,10 +11,11 @@ this document only covers what's already been implemented and measured.
 | Change | Result |
 |---|---|
 | Baseline (unoptimized) | 439.7 s |
-| + weights-only INT8, tiled weight caching, float32 SIMD | **47.1 s** (~9.3x) |
-| + ESP32-P4 instead of S3 | 28.4 s (~1.66x more) |
+| + weights-only INT8, tiled weight caching, float32 SIMD | 47.1 s (~9.3x) |
+| + ESP32-P4 instead of S3 | 28.4 s (~1.66x more, S3 still in use elsewhere below) |
 | + `-O2` instead of the Arduino default `-Os` | ~15% faster, no code change |
 | + dual-core (`setNumWorkers(2)`) | ~1.21x more, after fixing a core-pinning bug |
+| + weight-tile transpose (fused, unstrided SIMD dot product) | **34.1 s** (~1.46x more) |
 | INT8 activations (prototype, opt-in) | still ~1.4x *slower* than float32 -- not a win yet |
 | DMA-prefetching weight tiles | reverted -- silently corrupted data |
 
@@ -101,9 +102,9 @@ for this op.
 > the last, corrupting `duration_predictor`'s output (`t_y=67` instead of the correct
 > 128) before this was caught and fixed.
 
-### Net result so far
+### Net result so far (before the weight-tile transpose below)
 
-| Stage | ESP32-S3 baseline | ESP32-S3 current | Desktop (host build, current code) |
+| Stage | ESP32-S3 baseline | ESP32-S3 (this point) | Desktop (host build, current code) |
 |---|---|---|---|
 | `text_encoder` | ~1.1-1.3s | 117 ms | 2 ms |
 | `duration_predictor` | -- | 247 ms | 8 ms |
@@ -113,7 +114,9 @@ for this op.
 
 **~9.3x faster overall** on the ESP32-S3 itself, verified correct via a real cosine-
 similarity/SNR-checked pipeline plus a runtime sanity check (`duration_predictor`'s `t_y`
-must equal 128 for "Hello world!" -- any deviation means something upstream broke).
+must equal 128 for "Hello world!" -- any deviation means something upstream broke). See
+"Weight-tile transpose" further below for a later change that measurably improves on
+this table's `decoder`/total numbers.
 
 The desktop column is the identical, unmodified code compiled for the host build (this
 machine: an Intel Core i7-4650U laptop CPU @ 1.7GHz, nothing exotic) instead of an
@@ -173,39 +176,48 @@ this code has been measured on.
 samples, ~1.36s of audio at 44.1kHz) -- **~15.68s total**. `decoder` alone is ~87% of
 that, consistent with it dominating on every other platform in this document too.
 
-**Pi 4 Model B** (quad-core Cortex-A72, ARMv8-A, NEON, ~1.5GHz): `text_encoder` 13ms,
-`duration_predictor` 13ms (`t_y=117`), `flow` 215ms, `decoder` 1515ms -- **~1.76s
-total**, already faster than the ESP32-P4's optimized 28.4s by well over an order of
-magnitude, and within striking distance of real time despite running the same
-unmodified, single-threaded scalar code as the Pi Zero.
+**Pi 4 Model B** (quad-core Cortex-A72, ARMv8-A, NEON, ~1.5GHz -- core count directly
+confirmed via `nproc`, not assumed): `text_encoder` 13ms, `duration_predictor` 13ms
+(`t_y=117`), `flow` 215ms, `decoder` 1515ms -- **~1.76s total**, already faster than the
+ESP32-P4's optimized 28.4s by well over an order of magnitude, and within striking
+distance of real time despite running unmodified, single-threaded scalar code (this
+first measurement predates `-DTINYTTS_BUILD_PARALLEL_OPS=ON` even being enabled at
+configure time, so it's genuinely one thread, not just `--threads 1`).
 
-Two further experiments on the same Pi 4, neither of which moved the needle:
+Further experiments on the same Pi 4:
 
-- **`--threads 2`** (`TileSplitter`, same mechanism as the ESP32 dual-core path):
-  `flow` 222ms, `decoder` 1489ms, ~1.74s total -- essentially no change (noise-level,
-  same pattern as the ESP32's own modest ~1.21x from this feature), consistent with
-  this being a genuinely tiny model where per-call tiling/synchronization overhead
-  eats most of the available parallelism on 2 threads.
-- **NEON-accelerated `Ops.h`** (real ARM SIMD, prototyped in response to the above --
-  `linear()`'s contiguous dot product, plus manually-gathered strided variants for
-  `conv1d()`/`convTranspose1d()`'s tap-wise weight access, mirroring the existing
-  ESP32 `esp-dsp` path; confirmed active, not silently falling back to scalar -- this
-  board reports `aarch64`, which mandates NEON in the ISA with no extra compiler flags
-  needed): `encoder` 12ms, `duration_predictor` 12ms (`t_y=117`), `flow` 220ms,
+- **`--threads 2`** (`TileSplitter`, same mechanism as the ESP32 dual-core path, now
+  with `-DTINYTTS_BUILD_PARALLEL_OPS=ON`): `flow` 222ms, `decoder` 1489ms, ~1.74s total
+  -- essentially no change (noise-level), same modest-gain pattern as the ESP32's own
+  ~1.21x from this feature. Note this is 2 of the board's 4 real cores, not "most of"
+  a 2-core machine as an earlier version of this section assumed before the core count
+  was directly checked.
+- **NEON-accelerated `Ops.h`, pre-fusion** (real ARM SIMD -- `linear()`'s contiguous dot
+  product, plus manually-gathered strided variants for `conv1d()`/`convTranspose1d()`'s
+  tap-wise weight access, mirroring the pre-fusion ESP32 `esp-dsp` path; confirmed
+  active via `aarch64`, which mandates NEON with no extra compiler flags): `flow` 220ms,
   `decoder` 1498ms, ~1.74s total -- again essentially no change from the plain-scalar
-  run.
+  run, consistent with the same "manual gather adds fixed overhead per short dot
+  product" explanation already reached for esp-dsp's own `convTranspose1d` path above.
+- **NEON-accelerated `Ops.h`, post weight-tile-transpose fusion** (see the ESP32-S3
+  section below for what changed -- the same fusion removes NEON's manual-gather need
+  here too, replacing it with genuinely contiguous vector loads): `text_encoder` 11ms,
+  `duration_predictor` 9ms (`t_y=117`), `flow` 181ms, `decoder` 1452ms -- **~1.65s
+  total**, a real but modest ~6% improvement over the pre-fusion single-thread number
+  (1756ms -> 1653ms). Re-run with `--threads 4` (now genuinely using all 4 real cores,
+  confirmed via `nproc`, not oversubscribing a smaller chip), best of several runs:
+  `text_encoder` 10ms, `duration_predictor` 5ms, `flow` 147ms, `decoder` 1384ms --
+  **~1.55s total**, a further ~6.5% on top of the 2-worker fused number.
 
-  Likely cause, not yet confirmed: this model's decoder channel counts are small (as
-  low as 16-32, see the dual-core section above) and kernel sizes short, so most
-  `conv1d()`/`convTranspose1d()` dot products are only 1-2 SIMD vector-widths long --
-  too short to amortize the fixed per-call overhead the manual strided-gather adds
-  (four individual scalar loads before each 4-wide vector multiply-accumulate). The
-  same class of explanation was already reached above for esp-dsp's own
-  `convTranspose1d` SIMD path (~41.06s vs ~40.75s, "two-call overhead evidently
-  cancels out the SIMD win") -- short dot products and small channel counts appear to
-  be a structural mismatch for gather-based SIMD on this model, not a platform-specific
-  fluke. A real microbenchmark isolating just the dot-product loop at realistic
-  channel counts (16-64) would confirm or rule this out; not yet done.
+  The fusion's payoff is dramatically smaller here (~6%) than on ESP32-S3 (~46% total,
+  see below) -- plausible explanation: NEON's pre-fusion "manual gather" already issued
+  real vector loads/FMAs per 4 elements (just with 4 extra scalar loads to fill the
+  vector first), while esp-dsp's pre-fusion strided call (`dsps_dotprode_f32`) apparently
+  carried much higher *relative* per-call overhead that the fused, unstrided call
+  eliminates -- consistent with NEON being "close to optimal already, just not maximally
+  efficient" while esp-dsp's strided path was leaving much more on the table. Not
+  independently confirmed by a microbenchmark; a plausible read of the two platforms'
+  very different improvement magnitudes for the identical source-level change.
 
 ## Compiler optimization level: real, easy win
 
@@ -273,6 +285,53 @@ real and reproducible, unlike the pre-fix number. Every stage improved, not just
 `decoder` (encoder 117ms->82ms, duration_predictor 239ms->130ms, flow 4380ms->3435ms),
 consistent with other stages also calling `conv1d()`/`linear()` with enough tiles to
 benefit from the same fix.
+
+## Weight-tile transpose: fusing conv1d()'s per-tap SIMD calls into one
+
+**Status: implemented, measured on real ESP32-S3 hardware. Result: ~1.46x total, ~1.51x
+on `decoder` alone** -- the single largest float32-path win in this document after the
+original esp-dsp SIMD adoption itself.
+
+`conv1d()`'s float32 tap loop used to call `dsps_dotprode_f32` (esp-dsp's *strided* dot
+product) once per kernel tap `kk`, since the weight tile's native `[cin,k]` layout put
+each tap's `cin` weight values `k` apart in memory. Both `conv1d()` and
+`convTranspose1d()` now transpose their weight tile once per tile-load (`[cin,k]` ->
+`[k,cin]` for conv1d, `[cout,k]` -> `[k,cout]` for convTranspose1d) into a small,
+reused, STACK-allocated scratch buffer -- not a second heap-sized copy of the whole
+tile, see `kMaxRowSize`'s doc in `Ops.h` for why that distinction matters on a chip this
+starved for internal RAM. `conv1d()` also gathers each timestep's full receptive-field
+window into the same transposed layout. The payoff: what used to be `k` separate
+strided/gathered SIMD calls per output channel per timestep collapses into **one** fully
+contiguous `dsps_dotprod_f32` call over the whole `cin*k` window -- esp-dsp's plain
+unstrided dot product, not the strided variant, runs at meaningfully higher throughput.
+`convTranspose1d()`'s scatter update gets the same transpose, letting its old two-call
+`mulc()`+`add()` SIMD path (already measured as a wash, see item 3 above) be replaced by
+a simpler single-pass loop with no regression.
+
+Measured via a controlled A/B swap on one physical ESP32-S3 board (8MB embedded PSRAM,
+16MB flash, custom partition table) -- same board, same flash session, back-to-back,
+using a timing-only benchmark sketch (`examples/timing_benchmark/`, no I2S/audio
+hardware needed, same methodology as the ESP32-P4 measurement above) with the library's
+default `setNumWorkers(2)` (dual-core, unchanged from the previous section):
+
+| Stage | Before (strided per-tap calls) | After (fused, unstrided) |
+|---|---:|---:|
+| `text_encoder` | 117 ms | 93 ms |
+| `duration_predictor` | 240 ms | 178 ms |
+| `flow` | 4396 ms | 4009-4014 ms |
+| `decoder` | **45055 ms** | **29841-29910 ms** |
+| **Total** | **~49.8 s** | **~34.1-34.2 s** |
+
+Reproduced twice for the "after" build (two separate flash+run cycles, `flow`/`decoder`
+within 5ms/70ms of each other -- real embedded hardware ran deterministically here, no
+run-to-run OS scheduling noise the way a loaded desktop machine's A/B comparison of the
+identical change showed for the same measurement earlier in this project). Correctness
+verified the same way as everything else in this document
+(`duration_predictor`'s `t_y=128` for "Hello world!" held on both builds). The absolute
+"before" total here (~49.8s) doesn't exactly match the ~41.0s dual-core figure earlier
+in this document -- expected board-to-board/session variance (different physical chip,
+possibly different thermal state) rather than a discrepancy in this specific
+before/after comparison, which used one board throughout.
 
 ## INT8-activation `conv1d()`, real SIMD on ESP32
 

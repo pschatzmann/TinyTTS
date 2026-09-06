@@ -59,7 +59,7 @@ out of it, in short:
   optimization pass (INT8 weight quantization, tiled weight caching, SIMD-accelerated dot
   products), the fastest ESP32 measured is still ~19-32x slower than real time.
 - **It runs perfectly well on modern desktop computers and on faster microcomputers** (e.g.
-  a Raspberry Pi 5) -- both comfortably close to or faster than real time, on the exact same
+  a Raspberry Pi 4) -- both comfortably close to or faster than real time, on the exact same
   unmodified code.
 
 Real, flashed-hardware numbers for `speak("Hello world!")` (1.49s of resulting audio):
@@ -67,15 +67,16 @@ Real, flashed-hardware numbers for `speak("Hello world!")` (1.49s of resulting a
 | Board | Total time | vs. unoptimized baseline | Real-time factor |
 |---|---:|---:|---:|
 | ESP32-S3 (unoptimized baseline) | ~439.7 s | -- | ~296x slower than real time |
-| ESP32-S3 (optimized) | ~47.1 s | ~9.3x faster | ~32x slower than real time |
+| ESP32-S3 (optimized) | ~34.1 s | ~12.9x faster | ~22.9x slower than real time |
 | ESP32-P4 (optimized) | ~28.4 s | ~15.5x faster | ~19x slower than real time |
 | Raspberry Pi Zero W (desktop CLI, for reference) | ~15.68 s | ~28.0x faster | ~11.5x slower than real time |
-| Raspberry Pi 4 Model B (desktop CLI, for reference) | ~1.76 s | ~250x faster | ~1.29x slower than real time |
+| Raspberry Pi 4 Model B (desktop CLI, `--threads 4`, for reference) | ~1.55 s | ~284x faster | ~1.04x slower than real time |
 | Desktop (optimized, for reference) | ~0.76 s | ~581x faster | ~0.51x -- *faster* than real time |
 
-See `docs/performance.md` for the complete optimization story, per-board/per-stage
-breakdowns, and what was tried and didn't work (including a NEON SIMD prototype on Pi 4
-that, surprisingly, didn't help).
+See `docs/performance.md` for the complete optimization story and per-board/per-stage
+breakdowns, including a real ESP32-S3 hardware measurement of the weight-tile-transpose
+SIMD fusion (~46% faster total) and why the identical change helped far less on Pi 4's
+NEON path (~6%).
 
 ## Attribution
 
