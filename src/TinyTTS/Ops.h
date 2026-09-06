@@ -36,6 +36,24 @@
 #define TINYTTS_HAVE_ESP_DSP 1
 #endif
 
+// Optional: SIMD-accelerated float32 dot products via plain ARM NEON --
+// e.g. a Raspberry Pi 4's Cortex-A72 (desktop CLI build only; ESP32 chips
+// are Xtensa/RISC-V, never ARM, hence mutually exclusive with the
+// TINYTTS_HAVE_ESP_DSP block above). Unlike esp-dsp's dsps_dotprode_f32,
+// plain NEON has no strided/gather load instruction, so the tap-wise
+// (weight-side-strided) dot product used by conv1d()'s float32 path
+// below manually gathers up to 4 strided weight values into a vector
+// register before the multiply-accumulate -- still a real win over a
+// fully scalar loop (fewer mul/add instructions issued per element, and
+// the fully-contiguous case in linear() vectorizes cleanly with no
+// gather at all), just not as clean a win as esp-dsp's dedicated
+// strided-dot-product hardware primitive.
+#if !defined(TINYTTS_HAVE_ESP_DSP) && \
+    (defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)) && __has_include(<arm_neon.h>)
+#include <arm_neon.h>
+#define TINYTTS_HAVE_NEON 1
+#endif
+
 // DMA-prefetching weight tiles (GDMA async memcpy, overlapping the fetch
 // of the NEXT tile with CPU compute on the current one) was tried and
 // reverted: real-hardware testing showed it silently corrupts data when
@@ -61,6 +79,74 @@ namespace tinytts {
  */
 namespace ops {
 
+#ifdef TINYTTS_HAVE_NEON
+namespace detail {
+
+// Portable 4-lane horizontal sum -- vaddvq_f32 is AArch64-only, this form
+// (vadd_f32 of the two 2-lane halves, then vpadd_f32 to fold those) works
+// identically on both 32-bit ARMv7 NEON and AArch64.
+inline float neonHsum(float32x4_t v) {
+  float32x2_t lo = vget_low_f32(v);
+  float32x2_t hi = vget_high_f32(v);
+  float32x2_t s = vadd_f32(lo, hi);
+  s = vpadd_f32(s, s);
+  return vget_lane_f32(s, 0);
+}
+
+/// Contiguous dot product: *dot = sum(a[i]*b[i]) for i in [0,n) -- both
+/// sides unit-stride, e.g. linear()'s Mat rows. Overwrites *dot (matches
+/// dsps_dotprod_f32's semantics, not an accumulate) so call sites written
+/// against the esp-dsp API need no change beyond which function they call.
+inline void neonDotProd(const float* a, const float* b, float* dot, int n) {
+  float32x4_t acc = vdupq_n_f32(0.0f);
+  int i = 0;
+  for (; i + 4 <= n; i += 4) acc = vmlaq_f32(acc, vld1q_f32(a + i), vld1q_f32(b + i));
+  float sum = neonHsum(acc);
+  for (; i < n; i++) sum += a[i] * b[i];
+  *dot = sum;
+}
+
+/// Strided dot product: *dot = sum(a[i]*b[i*bstep]) for i in [0,n) -- `a`
+/// contiguous, `b` strided (conv1d()'s tap-wise weight access, the only
+/// strided shape this codebase needs -- see dsps_dotprode_f32's call site
+/// below). NEON has no gather-load instruction, so the 4 strided `b`
+/// values are read individually into a small on-stack array first; the
+/// multiply-accumulate itself still runs as one vector op per 4 elements.
+inline void neonDotProdStrided(const float* a, const float* b, float* dot, int n, int bstep) {
+  float32x4_t acc = vdupq_n_f32(0.0f);
+  int i = 0;
+  for (; i + 4 <= n; i += 4) {
+    float bv[4] = {b[(size_t)(i + 0) * bstep], b[(size_t)(i + 1) * bstep], b[(size_t)(i + 2) * bstep],
+                   b[(size_t)(i + 3) * bstep]};
+    acc = vmlaq_f32(acc, vld1q_f32(a + i), vld1q_f32(bv));
+  }
+  float sum = neonHsum(acc);
+  for (; i < n; i++) sum += a[i] * b[(size_t)i * bstep];
+  *dot = sum;
+}
+
+/// Fused scale-and-accumulate: y[i] += xv*w[i*wstep] for i in [0,n) --
+/// convTranspose1d()'s scatter update. Replaces esp-dsp's two-call
+/// mulc()+add() with a single multiply-accumulate pass per 4 elements
+/// (NEON has a real vector FMA, unlike esp-dsp which has no float32
+/// multiply-accumulate primitive at all). `w` is strided (same tap-wise
+/// weight layout as neonDotProdStrided above), `y` is contiguous.
+inline void neonMlaStrided(float* y, const float* w, int n, float xv, int wstep) {
+  float32x4_t vxv = vdupq_n_f32(xv);
+  int i = 0;
+  for (; i + 4 <= n; i += 4) {
+    float wv[4] = {w[(size_t)(i + 0) * wstep], w[(size_t)(i + 1) * wstep], w[(size_t)(i + 2) * wstep],
+                   w[(size_t)(i + 3) * wstep]};
+    float32x4_t vy = vld1q_f32(y + i);
+    vy = vmlaq_f32(vy, vxv, vld1q_f32(wv));
+    vst1q_f32(y + i, vy);
+  }
+  for (; i < n; i++) y[i] += xv * w[(size_t)i * wstep];
+}
+
+}  // namespace detail
+#endif  // TINYTTS_HAVE_NEON
+
 /// Conv1d(kernel_size=1) == per-timestep Linear. y[t,co] = sum_ci x[t,ci]*W[co,ci] + b[co]
 inline Mat linear(const Mat& x, const Mat& w, const std::vector<float>& bias) {
   Mat y(x.rows(), w.rows());
@@ -81,6 +167,10 @@ inline Mat linear(const Mat& x, const Mat& w, const std::vector<float>& bias) {
       // already stored in it -- dot into a scratch var and add instead.
       float dot = 0.0f;
       dsps_dotprod_f32(xr, wr, &dot, w.cols());
+      acc += dot;
+#elif defined(TINYTTS_HAVE_NEON)
+      float dot = 0.0f;
+      detail::neonDotProd(xr, wr, &dot, w.cols());
       acc += dot;
 #else
       for (int ci = 0; ci < w.cols(); ci++) acc += xr[ci] * wr[ci];
@@ -363,6 +453,13 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
               dsps_dotprode_f32(xrows[kk], wrow + kk, &dot, cin, 1, k);
               acc += dot;
             }
+#elif defined(TINYTTS_HAVE_NEON)
+            for (int kk = 0; kk < k; kk++) {
+              if (!xrows[kk]) continue;
+              float dot = 0.0f;
+              detail::neonDotProdStrided(xrows[kk], wrow + kk, &dot, cin, k);
+              acc += dot;
+            }
 #else
             for (int ci = 0; ci < cin; ci++) {
               const float* wk = wrow + (size_t)ci * k;
@@ -457,6 +554,11 @@ inline Mat convTranspose1d(const Mat& x, const WeightStore::Entry& w, const std:
             if (!yrows[kk]) continue;
             dsps_mulc_f32(wrow + kk, scaled.data(), cout, xv, k, 1);
             dsps_add_f32(yrows[kk], scaled.data(), yrows[kk], cout, 1, 1, 1);
+          }
+#elif defined(TINYTTS_HAVE_NEON)
+          for (int kk = 0; kk < k; kk++) {
+            if (!yrows[kk]) continue;
+            detail::neonMlaStrided(yrows[kk], wrow + kk, cout, xv, k);
           }
 #else
           for (int co = 0; co < cout; co++) {
