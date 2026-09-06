@@ -59,7 +59,7 @@ out of it, in short:
   optimization pass (INT8 weight quantization, tiled weight caching, SIMD-accelerated dot
   products), the fastest ESP32 measured is still ~19-32x slower than real time.
 - **It runs perfectly well on modern desktop computers and on faster microcomputers** (e.g.
-  a Raspberry Pi 4) -- both comfortably close to or faster than real time, on the exact same
+  a Raspberry Pi 5) -- both comfortably close to or faster than real time, on the exact same
   unmodified code.
 
 Real, flashed-hardware numbers for `speak("Hello world!")` (1.49s of resulting audio):
