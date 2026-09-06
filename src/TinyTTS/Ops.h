@@ -13,10 +13,14 @@
 #include "TinyTTS/WeightStore.h"
 
 // Optional: SIMD-accelerated dot products for ESP32-S3/P4. Float32
-// (dsps_dotprod_f32/dsps_dotprode_f32/dsps_mulc_f32/dsps_add_f32) comes
-// from the Arduino-ESP32 core's OWN bundled esp-dsp component (~3.3.x+
-// cores ship one) -- found automatically via <dsps_dotprod.h>/<dsps_mulc.h>/
-// <dsps_add.h>, nothing to vendor for that part. INT8
+// (dsps_dotprod_f32) comes from the Arduino-ESP32 core's OWN bundled
+// esp-dsp component (~3.3.x+ cores ship one) -- found automatically via
+// <dsps_dotprod.h>, nothing to vendor for that part. Both conv1d() and
+// convTranspose1d() transpose their weight tiles into a per-tap-contiguous
+// layout (see their own docs) specifically so every hot-path call is the
+// plain unstrided dsps_dotprod_f32 -- esp-dsp's strided dsps_dotprode_f32
+// and its mulc()/add() pair (formerly used for convTranspose1d's scatter,
+// see docs/performance.md) are no longer needed at all. INT8
 // (tinytts::dspsDotProdS8, used by conv1d()'s INT8-activation path) is
 // vendored in src/int8-dotprod/ instead, via a quoted, project-relative
 // include, NOT <dsps_dotprod.h> -- the core's bundled component doesn't
@@ -30,8 +34,6 @@
 // below.
 #if defined(ESP32) && __has_include(<dsps_dotprod.h>)
 #include <dsps_dotprod.h>
-#include <dsps_mulc.h>
-#include <dsps_add.h>
 #include "int8-dotprod/dsps_dp_s8.h"
 #define TINYTTS_HAVE_ESP_DSP 1
 #endif
@@ -39,15 +41,9 @@
 // Optional: SIMD-accelerated float32 dot products via plain ARM NEON --
 // e.g. a Raspberry Pi 4's Cortex-A72 (desktop CLI build only; ESP32 chips
 // are Xtensa/RISC-V, never ARM, hence mutually exclusive with the
-// TINYTTS_HAVE_ESP_DSP block above). Unlike esp-dsp's dsps_dotprode_f32,
-// plain NEON has no strided/gather load instruction, so the tap-wise
-// (weight-side-strided) dot product used by conv1d()'s float32 path
-// below manually gathers up to 4 strided weight values into a vector
-// register before the multiply-accumulate -- still a real win over a
-// fully scalar loop (fewer mul/add instructions issued per element, and
-// the fully-contiguous case in linear() vectorizes cleanly with no
-// gather at all), just not as clean a win as esp-dsp's dedicated
-// strided-dot-product hardware primitive.
+// TINYTTS_HAVE_ESP_DSP block above). Same per-tap weight transpose as the
+// esp-dsp path above means every hot-path NEON call here is a plain
+// contiguous vld1q_f32 load, no manual strided gather needed.
 #if !defined(TINYTTS_HAVE_ESP_DSP) && \
     (defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__)) && __has_include(<arm_neon.h>)
 #include <arm_neon.h>
@@ -106,42 +102,20 @@ inline void neonDotProd(const float* a, const float* b, float* dot, int n) {
   *dot = sum;
 }
 
-/// Strided dot product: *dot = sum(a[i]*b[i*bstep]) for i in [0,n) -- `a`
-/// contiguous, `b` strided (conv1d()'s tap-wise weight access, the only
-/// strided shape this codebase needs -- see dsps_dotprode_f32's call site
-/// below). NEON has no gather-load instruction, so the 4 strided `b`
-/// values are read individually into a small on-stack array first; the
-/// multiply-accumulate itself still runs as one vector op per 4 elements.
-inline void neonDotProdStrided(const float* a, const float* b, float* dot, int n, int bstep) {
-  float32x4_t acc = vdupq_n_f32(0.0f);
-  int i = 0;
-  for (; i + 4 <= n; i += 4) {
-    float bv[4] = {b[(size_t)(i + 0) * bstep], b[(size_t)(i + 1) * bstep], b[(size_t)(i + 2) * bstep],
-                   b[(size_t)(i + 3) * bstep]};
-    acc = vmlaq_f32(acc, vld1q_f32(a + i), vld1q_f32(bv));
-  }
-  float sum = neonHsum(acc);
-  for (; i < n; i++) sum += a[i] * b[(size_t)i * bstep];
-  *dot = sum;
-}
-
-/// Fused scale-and-accumulate: y[i] += xv*w[i*wstep] for i in [0,n) --
-/// convTranspose1d()'s scatter update. Replaces esp-dsp's two-call
-/// mulc()+add() with a single multiply-accumulate pass per 4 elements
-/// (NEON has a real vector FMA, unlike esp-dsp which has no float32
-/// multiply-accumulate primitive at all). `w` is strided (same tap-wise
-/// weight layout as neonDotProdStrided above), `y` is contiguous.
-inline void neonMlaStrided(float* y, const float* w, int n, float xv, int wstep) {
+/// Fused scale-and-accumulate: y[i] += xv*w[i] for i in [0,n), both sides
+/// contiguous -- convTranspose1d()'s scatter update, after its weight tile
+/// has been transposed into a per-tap-contiguous layout (mirroring
+/// conv1d()'s own weight transpose, see conv1d()'s doc). A real vector FMA
+/// per 4 elements, unlike esp-dsp which has no float32 multiply-accumulate
+/// primitive at all (checked directly against its vendored source).
+inline void neonMla(float* y, const float* w, int n, float xv) {
   float32x4_t vxv = vdupq_n_f32(xv);
   int i = 0;
   for (; i + 4 <= n; i += 4) {
-    float wv[4] = {w[(size_t)(i + 0) * wstep], w[(size_t)(i + 1) * wstep], w[(size_t)(i + 2) * wstep],
-                   w[(size_t)(i + 3) * wstep]};
-    float32x4_t vy = vld1q_f32(y + i);
-    vy = vmlaq_f32(vy, vxv, vld1q_f32(wv));
+    float32x4_t vy = vmlaq_f32(vld1q_f32(y + i), vxv, vld1q_f32(w + i));
     vst1q_f32(y + i, vy);
   }
-  for (; i < n; i++) y[i] += xv * w[(size_t)i * wstep];
+  for (; i < n; i++) y[i] += xv * w[i];
 }
 
 }  // namespace detail
@@ -185,6 +159,39 @@ inline Mat linear(const Mat& x, const Mat& w, const std::vector<float>& bias) {
 // biggest upsample kernel is 16) -- a fixed stack buffer avoids a heap
 // allocation in these hot loops. Generous headroom over the real max.
 constexpr int kMaxKernelSize = 64;
+
+// Bound on cin*k for conv1d() / cout*k for convTranspose1d() (one weight
+// row's element count, a.k.a. row_size below) -- used to size small, fixed,
+// STACK scratch buffers for both ops' weight-tile transpose and (conv1d
+// only) per-timestep input-gather (see their own docs for why both exist).
+// This is the actual verified maximum across every layer in the shipped
+// decoder, not a padded guess -- deliberately NOT given extra headroom the
+// way kMaxKernelSize above is: these buffers are STACK-allocated inside
+// conv1d()/convTranspose1d()'s tile lambda, which on ESP32 runs inside a
+// worker task with only a 16KB stack budget (TileSplitter's
+// stackSizeWords=4096 words, see Concurrency/TileSplitter.h) -- padding
+// this the way kMaxKernelSize is would burn a meaningful fraction of that
+// budget on slack no real layer needs, risking exactly the kind of
+// resource-exhaustion crash this project's own history warns about
+// (see kWeightTileRows's doc for the analogous internal-RAM story).
+// Verified by direct runtime instrumentation across a full speak() call
+// (every conv1d()/convTranspose1d() call site, not just the ones a static
+// read of the model source suggested -- an earlier attempt at this bound,
+// based on reading research/tiny_tts's Python reference config, missed
+// DurationPredictor's and TransformerBlock's FFN conv1d calls entirely and
+// separately got the shipped model's actual filter_channels wrong (256, not
+// the config file's 128) -- both mistakes caused a real stack-buffer
+// overflow/crash before this was caught and re-measured directly).
+// Real max: conv1d's largest is DurationPredictor's conv_2 (Cin=256, K=3 ->
+// 768); convTranspose1d's largest is the decoder's stage-0 upsample
+// (Cout=32, K=16 -> 512). Channel counts and kernel sizes are fixed by the
+// model architecture, not by input text, so this holds for every possible
+// input, not just the utterance used to measure it -- but if the model
+// architecture ever changes (more channels, larger kernels, a new module
+// that also calls these ops), this constant must be re-verified against the
+// new real max, ideally the same way (instrument and run, not just read the
+// source) -- undersizing it means these stack buffers silently overflow.
+constexpr int kMaxRowSize = 768;
 
 // Rows (dim0 of the weight tensor -- Cout for conv1d, Cin for
 // convTranspose1d) decoded into internal RAM at a time. A whole-tensor cache
@@ -379,7 +386,6 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
     } else {
       wtile.resize((size_t)kWeightTileRows * row_size);
     }
-    const float* xrows[kMaxKernelSize];
     const int8_t* xqrows[kMaxKernelSize];
     for (int tile = tile0; tile < tile1; tile++) {
       int co0 = tile * kWeightTileRows;
@@ -394,16 +400,45 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
           }
         }
       } else {
-        for (int r = 0; r < tile_rows; r++)
-          w.decodeRun((size_t)(co0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
+        // Decode this row in its native [cin,k] order into a small stack
+        // scratch buffer, then transpose into wtile as [k,cin] -- lets the
+        // per-timestep dot product below run as ONE fully-contiguous call
+        // over row_size (cin*k) elements instead of k separate
+        // strided/gathered calls, one per kernel tap. `rowbuf` is a fixed,
+        // reused-every-iteration STACK buffer (see kMaxRowSize's doc for
+        // why this isn't another heap allocation the size of the whole
+        // tile).
+        float rowbuf[kMaxRowSize];
+        for (int r = 0; r < tile_rows; r++) {
+          w.decodeRun((size_t)(co0 + r) * row_size, row_size, rowbuf);
+          float* dst = wtile.data() + (size_t)r * row_size;
+          for (int kk = 0; kk < k; kk++)
+            for (int ci = 0; ci < cin; ci++) dst[(size_t)kk * cin + ci] = rowbuf[(size_t)ci * k + kk];
+        }
       }
 
+      // Float32 path only: this tile's full receptive-field window for the
+      // CURRENT timestep, gathered into one contiguous [k,cin] buffer
+      // (zero-padded for out-of-range taps, matching wtile's transposed
+      // layout above) -- rebuilt per tile (redundant across tiles, like
+      // wtile's own per-tile weight decode), since caching it for every t
+      // up front would need a T*row_size buffer -- infeasible given T runs
+      // into the tens of thousands of frames deep in the decoder's upsample
+      // stages (see xq/x_scale's own doc above for the identical reasoning
+      // applied to activation quantization).
+      float xtap[kMaxRowSize];
       for (int t = 0; t < T; t++) {
         for (int kk = 0; kk < k; kk++) {
           int ti = t + kk * dilation - pad;
           bool valid = ti >= 0 && ti < T;
-          xrows[kk] = valid ? x.row(ti) : nullptr;
           xqrows[kk] = (use_int8 && valid) ? xq.data() + (size_t)ti * cin_padded : nullptr;
+          if (!use_int8) {
+            float* dst = xtap + (size_t)kk * cin;
+            if (valid)
+              std::memcpy(dst, x.row(ti), (size_t)cin * sizeof(float));
+            else
+              std::memset(dst, 0, (size_t)cin * sizeof(float));
+          }
         }
         float* yr = y.row(t);
         for (int r = 0; r < tile_rows; r++) {
@@ -435,38 +470,25 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
               acc += (float)dot * x_scale[ti] * wscale;
             }
           } else {
-            const float* wrow = wtile.data() + (size_t)r * row_size;  // [cin, k]
+            // wrow is [k,cin], transposed+contiguous (see the weight-decode
+            // step above); xtap is this timestep's gathered [k,cin] input
+            // window in the identical layout -- so the whole tap loop
+            // collapses into ONE dot product over row_size (cin*k)
+            // elements, fully contiguous on both sides. This replaces what
+            // used to be k separate strided/gathered dot-product calls
+            // (one per kernel tap), each paying its own per-call overhead
+            // -- see kMaxRowSize's doc for the memory-safety reasoning
+            // behind how xtap/wtile are sized and reused.
+            const float* wrow = wtile.data() + (size_t)r * row_size;
+            float dot = 0.0f;
 #ifdef TINYTTS_HAVE_ESP_DSP
-            // Per kernel tap kk: dot(xrows[kk][0..cin), wrow[ci*k+kk] for
-            // ci in [0..cin)) -- the weight side isn't contiguous (stride k
-            // within a [cin,k] row), so this uses dsps_dotprode_f32's step2
-            // rather than needing to transpose the tile layout. Every real
-            // implementation of dsps_dotprod(e)_f32 (ansi/ae32/aes3, checked
-            // directly in the vendored source) does `*dest = acc` -- an
-            // overwrite, not the "*dest += ..." upstream's doc comment
-            // claims -- so each kk's partial dot goes into a scratch var and
-            // gets added to acc explicitly; passing &acc straight through
-            // would silently drop the bias and every kk but the last.
-            for (int kk = 0; kk < k; kk++) {
-              if (!xrows[kk]) continue;
-              float dot = 0.0f;
-              dsps_dotprode_f32(xrows[kk], wrow + kk, &dot, cin, 1, k);
-              acc += dot;
-            }
+            dsps_dotprod_f32(xtap, wrow, &dot, (int)row_size);
 #elif defined(TINYTTS_HAVE_NEON)
-            for (int kk = 0; kk < k; kk++) {
-              if (!xrows[kk]) continue;
-              float dot = 0.0f;
-              detail::neonDotProdStrided(xrows[kk], wrow + kk, &dot, cin, k);
-              acc += dot;
-            }
+            detail::neonDotProd(xtap, wrow, &dot, (int)row_size);
 #else
-            for (int ci = 0; ci < cin; ci++) {
-              const float* wk = wrow + (size_t)ci * k;
-              for (int kk = 0; kk < k; kk++)
-                if (xrows[kk]) acc += xrows[kk][ci] * wk[kk];
-            }
+            for (size_t i = 0; i < row_size; i++) dot += xtap[i] * wrow[i];
 #endif
+            acc += dot;
           }
           yr[co] = acc;
         }
@@ -515,18 +537,24 @@ inline Mat convTranspose1d(const Mat& x, const WeightStore::Entry& w, const std:
   auto tileRange = [&](Mat& acc, int tile0, int tile1) {
     InternalVector<float> wtile;
     wtile.resize((size_t)kWeightTileRows * row_size);
-#ifdef TINYTTS_HAVE_ESP_DSP
-    // Scratch for the mulc+add two-step below (see its doc). cout-sized,
-    // tiny (largest in this model is a few hundred floats).
-    InternalVector<float> scaled;
-    scaled.resize((size_t)cout);
-#endif
     float* yrows[kMaxKernelSize];
     for (int tile = tile0; tile < tile1; tile++) {
       int ci0 = tile * kWeightTileRows;
       int tile_rows = std::min(kWeightTileRows, cin - ci0);
-      for (int r = 0; r < tile_rows; r++)
-        w.decodeRun((size_t)(ci0 + r) * row_size, row_size, wtile.data() + (size_t)r * row_size);
+      // Decode each row in its native [cout,k] order into a small stack
+      // scratch buffer, then transpose into wtile as [k,cout] -- so the
+      // scatter loop below reads/writes contiguous cout-length runs for a
+      // fixed tap kk instead of a stride-k gather, mirroring conv1d()'s own
+      // weight transpose (see its doc for the same reasoning, including why
+      // this is a small reused STACK buffer, not another kWeightTileRows-
+      // sized heap one).
+      float rowbuf[kMaxRowSize];
+      for (int r = 0; r < tile_rows; r++) {
+        w.decodeRun((size_t)(ci0 + r) * row_size, row_size, rowbuf);
+        float* dst = wtile.data() + (size_t)r * row_size;
+        for (int kk = 0; kk < k; kk++)
+          for (int co = 0; co < cout; co++) dst[(size_t)kk * cout + co] = rowbuf[(size_t)co * k + kk];
+      }
 
       for (int ti = 0; ti < x.rows(); ti++) {
         const float* xr = x.row(ti);
@@ -537,34 +565,31 @@ inline Mat convTranspose1d(const Mat& x, const WeightStore::Entry& w, const std:
         for (int r = 0; r < tile_rows; r++) {
           int ci = ci0 + r;
           float xv = xr[ci];
-          const float* wrow = wtile.data() + (size_t)r * row_size;  // [cout, k]
-#ifdef TINYTTS_HAVE_ESP_DSP
+          const float* wrow = wtile.data() + (size_t)r * row_size;  // [k, cout], transposed+contiguous
           // This op scatters (yrows[kk][co] += xv*w[co,kk]), unlike
-          // conv1d's gather, so there's no single dot-product primitive
-          // for it. esp-dsp has no float32 multiply-accumulate op either
-          // (checked the vendored source directly, same way the dotprod
+          // conv1d's gather, so there's no single dot-product primitive for
+          // it -- but with wrow transposed above, a fixed tap kk's cout
+          // values ARE now contiguous, same as conv1d()'s fused dot. esp-dsp
+          // has no float32 multiply-accumulate op though (checked the
+          // vendored source directly, same way the dotprod
           // overwrite-vs-accumulate bug was found -- not trusting doc
-          // comments alone this time), so this is two SIMD calls instead
-          // of one: scale w[:,kk] by xv into `scaled` (dsps_mulc_f32,
-          // strided read since w's row is [cout,k]), then add that into
-          // yrows[kk] in place (dsps_add_f32) -- both are plain elementwise
-          // overwrites of their output, confirmed against the assembly, so
-          // no accumulate-semantics trap here.
+          // comments alone this time), so esp32 gets no dedicated SIMD path
+          // here: an earlier two-call mulc()+add() version (real esp-dsp
+          // SIMD, but writing/re-reading a full `scaled[cout]` scratch
+          // buffer through memory between the two calls) measured as a wash
+          // against a plain scalar loop (~41.06s vs. ~40.75s, see
+          // docs/performance.md) -- removed rather than kept as dead-weight
+          // complexity for no real gain.
+#if defined(TINYTTS_HAVE_NEON)
           for (int kk = 0; kk < k; kk++) {
             if (!yrows[kk]) continue;
-            dsps_mulc_f32(wrow + kk, scaled.data(), cout, xv, k, 1);
-            dsps_add_f32(yrows[kk], scaled.data(), yrows[kk], cout, 1, 1, 1);
-          }
-#elif defined(TINYTTS_HAVE_NEON)
-          for (int kk = 0; kk < k; kk++) {
-            if (!yrows[kk]) continue;
-            detail::neonMlaStrided(yrows[kk], wrow + kk, cout, xv, k);
+            detail::neonMla(yrows[kk], wrow + (size_t)kk * cout, cout, xv);
           }
 #else
-          for (int co = 0; co < cout; co++) {
-            const float* wk = wrow + (size_t)co * k;
-            for (int kk = 0; kk < k; kk++)
-              if (yrows[kk]) yrows[kk][co] += xv * wk[kk];
+          for (int kk = 0; kk < k; kk++) {
+            if (!yrows[kk]) continue;
+            const float* wk = wrow + (size_t)kk * cout;
+            for (int co = 0; co < cout; co++) yrows[kk][co] += xv * wk[co];
           }
 #endif
         }
