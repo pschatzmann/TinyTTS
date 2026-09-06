@@ -51,6 +51,17 @@ target_compile_definitions(tinytts_desktop PRIVATE IS_MIN_DESKTOP TINYTTS_DESKTO
 find_package(Threads REQUIRED)
 target_link_libraries(tinytts_desktop PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
 
+# On 32-bit ARM without native 8-byte atomic instructions (e.g. Raspberry
+# Pi Zero's ARMv6), GCC/glibc lower std::atomic<uint64_t>/ma_uint64 ops
+# (used throughout miniaudio) to __atomic_*_8 libcalls instead of inline
+# instructions -- those live in libatomic, which isn't linked by default.
+# Harmless no-op on platforms that don't need it (x86_64, aarch64, ...).
+include(CheckLibraryExists)
+check_library_exists(atomic __atomic_fetch_add_8 "" HAVE_LIBATOMIC)
+if(HAVE_LIBATOMIC)
+  target_link_libraries(tinytts_desktop PRIVATE atomic)
+endif()
+
 # Without this, `cmake --install`/`make install` silently installs nothing
 # of ours at all (only arduino-audio-tools' own headers, as an incidental
 # side effect of its unrelated install() rules) -- there's no default
