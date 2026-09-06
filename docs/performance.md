@@ -20,6 +20,16 @@ this document only covers what's already been implemented and measured.
 
 Details, numbers, and the bugs found along the way are below.
 
+## Memory footprint (measured, not the bottleneck)
+
+Flash/RAM was never the constraint this project ran into -- worth stating plainly since
+everything else in this document is about compute time. The recommended data set (weights +
+slimmed dictionary + neural G2P fallback model, see `docs/model-data.md`) is **4.21 MB
+total**, comfortably within a 16MB-flash module's budget with room left for application
+code. On real hardware, PSRAM actually used after `begin()` was only **~743 KB**, whether on
+an 8MB-PSRAM ESP32-S3 module or a 32MB-PSRAM ESP32-P4 module -- the rest of PSRAM stays free
+for the rest of the application.
+
 ## Baseline
 
 Before any of the work below, `TinyTTS.speak("Hello world!")` took **~439.7 seconds**
@@ -150,6 +160,52 @@ memory-management) overhead that may benefit differently from P4's newer core.
 Combined with the 16kHz retraining projection below (not yet done, so still an estimate
 on top of a real measurement): **P4 @ 16kHz projected ~11 s**, vs. the current S3 @
 44.1kHz 47.1s -- about 4.3x faster.
+
+## Cross-platform: Raspberry Pi (desktop CLI, measured)
+
+Not the Arduino/ESP-IDF microcontroller library -- both boards below run the `desktop/`
+CLI's host code path (a normal Linux build of the same, unmodified `Ops.h`/model code),
+included as reference points spanning from the weakest to a genuinely capable real chip
+this code has been measured on.
+
+**Pi Zero W** (single-core ARM1176JZF-S, ARMv6, no NEON/SIMD, ~1GHz): `text_encoder`
+47ms, `duration_predictor` 126ms (`t_y=117`), `flow` 1869ms, `decoder` 13642ms (59904
+samples, ~1.36s of audio at 44.1kHz) -- **~15.68s total**. `decoder` alone is ~87% of
+that, consistent with it dominating on every other platform in this document too.
+
+**Pi 4 Model B** (quad-core Cortex-A72, ARMv8-A, NEON, ~1.5GHz): `text_encoder` 13ms,
+`duration_predictor` 13ms (`t_y=117`), `flow` 215ms, `decoder` 1515ms -- **~1.76s
+total**, already faster than the ESP32-P4's optimized 28.4s by well over an order of
+magnitude, and within striking distance of real time despite running the same
+unmodified, single-threaded scalar code as the Pi Zero.
+
+Two further experiments on the same Pi 4, neither of which moved the needle:
+
+- **`--threads 2`** (`TileSplitter`, same mechanism as the ESP32 dual-core path):
+  `flow` 222ms, `decoder` 1489ms, ~1.74s total -- essentially no change (noise-level,
+  same pattern as the ESP32's own modest ~1.21x from this feature), consistent with
+  this being a genuinely tiny model where per-call tiling/synchronization overhead
+  eats most of the available parallelism on 2 threads.
+- **NEON-accelerated `Ops.h`** (real ARM SIMD, prototyped in response to the above --
+  `linear()`'s contiguous dot product, plus manually-gathered strided variants for
+  `conv1d()`/`convTranspose1d()`'s tap-wise weight access, mirroring the existing
+  ESP32 `esp-dsp` path; confirmed active, not silently falling back to scalar -- this
+  board reports `aarch64`, which mandates NEON in the ISA with no extra compiler flags
+  needed): `encoder` 12ms, `duration_predictor` 12ms (`t_y=117`), `flow` 220ms,
+  `decoder` 1498ms, ~1.74s total -- again essentially no change from the plain-scalar
+  run.
+
+  Likely cause, not yet confirmed: this model's decoder channel counts are small (as
+  low as 16-32, see the dual-core section above) and kernel sizes short, so most
+  `conv1d()`/`convTranspose1d()` dot products are only 1-2 SIMD vector-widths long --
+  too short to amortize the fixed per-call overhead the manual strided-gather adds
+  (four individual scalar loads before each 4-wide vector multiply-accumulate). The
+  same class of explanation was already reached above for esp-dsp's own
+  `convTranspose1d` SIMD path (~41.06s vs ~40.75s, "two-call overhead evidently
+  cancels out the SIMD win") -- short dot products and small channel counts appear to
+  be a structural mismatch for gather-based SIMD on this model, not a platform-specific
+  fluke. A real microbenchmark isolating just the dot-product loop at realistic
+  channel counts (16-64) would confirm or rule this out; not yet done.
 
 ## Compiler optimization level: real, easy win
 
