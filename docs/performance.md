@@ -16,7 +16,8 @@ this document only covers what's already been implemented and measured.
 | + `-O2` instead of the Arduino default `-Os` | ~15% faster, no code change |
 | + dual-core (`setNumWorkers(2)`) | ~1.21x more, after fixing a core-pinning bug |
 | + weight-tile transpose (fused, unstrided SIMD dot product) | **34.1 s** (~1.46x more) |
-| INT8 activations (prototype, opt-in) | still ~1.4x *slower* than float32 -- not a win yet |
+| INT8 activations (prototype, opt-in) | still ~1.68x *slower* than fused float32 on `decoder` -- not a win yet |
+| + fusing INT8 activations the same way (per-window quant) | reverted -- slower AND lower quality |
 | DMA-prefetching weight tiles | reverted -- silently corrupted data |
 
 Details, numbers, and the bugs found along the way are below.
@@ -373,7 +374,10 @@ two hardware-only-visible bugs found and fixed along the way:
 | INT8, corrected SIMD kernel, 2 cores | **~51.5 s** | **~55.6 s** |
 
 The first pass (scalar-only, broken kernel disabled) measured INT8 as **~1.9x
-*slower*** than float32.
+*slower*** than float32. (float32's own numbers here predate the weight-tile-transpose
+fusion further above, which brought it down to ~29.8s/~34.1s -- INT8's ~51.5s/~55.6s is
+unchanged by that section, re-verified after it, see "Tried and reverted: fusing
+INT8-activation's per-tap calls" below for why fusing INT8 the same way didn't work.)
 
 > **Bug found here (1 of 2)**: the original SIMD kernel (`dsps_dp_s8_aes3`, from
 > `espressif/esp-dsp`) was genuinely broken, not just suspicious. A self-test added
@@ -431,6 +435,57 @@ the weight-tile reshape into a padded per-tap layout, and any wasted work from p
 Weights-only INT8 (item 1 above, ~22-27dB SNR, no speed cost) remains the shipped
 default; this prototype stays available via `setDecoderPrecision(kInt8Activations)` for
 experimentation, not as something to switch to by default.
+
+### Tried and reverted: fusing INT8-activation's per-tap calls the same way as float32
+
+Given the weight-tile-transpose fusion's large win on the float32 path (see that section
+above -- ~1.51x on `decoder`), the obvious follow-up question: does the identical trick
+fix this section's own "too short for the kernel's real throughput advantage to outweigh
+the fixed per-call overhead" diagnosis? **Tried on real ESP32-S3 hardware. Answer: no --
+worse on both speed and quality, not a tradeoff.**
+
+The float32 fusion works because summing `cin*k` products in one pass instead of `k`
+separate `cin`-length passes is mathematically identical either way (float addition is
+associative here to rounding-level precision). INT8 activations can't do the same thing
+for free: this path quantizes activations **per input row** (`x_scale[t]`, `Ops.h`), and
+a conv1d output's `k`-tap receptive field generally reads `k` *different* input rows,
+each already quantized at its own independently-computed scale. Fusing all `k` taps into
+one integer dot product before rescaling would silently apply the wrong scale to every
+tap but one -- a correctness bug, not just a missed optimization.
+
+The fix that makes fusion valid: quantize per **window** instead (one shared scale over
+the whole receptive field a given output timestep reads, computed fresh each timestep)
+instead of per row. Implemented, and correct (`t_y=128` held, clean under
+AddressSanitizer) -- but measured on real ESP32-S3 hardware at **~78.3s decoder time**,
+dramatically slower than both this section's own prior ~51.5s and float32's fused 29.8s.
+The extra abs-max-scan-and-quantize work this requires (`k*cin` elements freshly rescanned
+every output timestep, redundantly per weight tile, vs. the per-row scheme's `cin`
+elements computed once and shared globally across every conv1d() call that reads that
+row) completely swamped the savings from fusing the SIMD calls -- exactly the kind of
+fixed-cost-vs-payoff mismatch this section already predicted for short dot products, just
+manifesting on the quantization side instead of the dot-product side this time.
+
+It was also measurably worse audio quality: **18.36dB SNR / 0.9927 cosine similarity**,
+down from this scheme's already-shipped ~23.37dB / 0.9977 (both measured float32-vs-int8
+on the same "Hello world!" utterance) -- a coarser, window-wide scale captures the
+activation's dynamic range less precisely than a per-row one. Worse on both axes, so
+reverted rather than kept as an opt-in variant.
+
+> **Bug found here**: the first version of this experiment crashed real ESP32-S3
+> hardware with `Guru Meditation Error... Stack canary watchpoint triggered (loopTask)`
+> -- a genuine stack-buffer overflow, not the usual internal-RAM/PSRAM exhaustion this
+> document otherwise warns about. The new per-window quantize buffer was a plain
+> `int8_t buf[kMaxRowSize]` stack array, same pattern conv1d()'s float32 fusion already
+> used successfully -- but `conv1d()`'s tile lambda can run directly on the *calling*
+> thread rather than always on `TileSplitter`'s dedicated 16KB worker-task stack, and the
+> calling thread here was the Arduino main `loopTask`, whose own default stack is much
+> smaller and already mostly spent by the rest of the synthesis call chain before
+> `conv1d()` even runs. Fixed (independently of the fusion revert above) by moving these
+> scratch buffers to internal-heap allocation (`InternalVector`/`AlignedInternalVector`,
+> the same allocator `wtile`/`wtile_i8` already use) instead of the stack -- a real,
+> general fix kept even after the fusion itself was reverted, since the same risk applies
+> to any future kMaxRowSize-sized scratch buffer regardless of which thread ends up
+> running it.
 
 <details>
 <summary>Note for anyone re-running this benchmark</summary>

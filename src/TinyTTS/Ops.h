@@ -161,19 +161,27 @@ inline Mat linear(const Mat& x, const Mat& w, const std::vector<float>& bias) {
 constexpr int kMaxKernelSize = 64;
 
 // Bound on cin*k for conv1d() / cout*k for convTranspose1d() (one weight
-// row's element count, a.k.a. row_size below) -- used to size small, fixed,
-// STACK scratch buffers for both ops' weight-tile transpose and (conv1d
-// only) per-timestep input-gather (see their own docs for why both exist).
-// This is the actual verified maximum across every layer in the shipped
-// decoder, not a padded guess -- deliberately NOT given extra headroom the
-// way kMaxKernelSize above is: these buffers are STACK-allocated inside
-// conv1d()/convTranspose1d()'s tile lambda, which on ESP32 runs inside a
-// worker task with only a 16KB stack budget (TileSplitter's
-// stackSizeWords=4096 words, see Concurrency/TileSplitter.h) -- padding
-// this the way kMaxKernelSize is would burn a meaningful fraction of that
-// budget on slack no real layer needs, risking exactly the kind of
-// resource-exhaustion crash this project's own history warns about
-// (see kWeightTileRows's doc for the analogous internal-RAM story).
+// row's element count, a.k.a. row_size below) -- used to size small, fixed
+// internal-heap scratch buffers (InternalVector/AlignedInternalVector, see
+// their call sites) for both ops' weight-tile transpose, conv1d's
+// per-timestep input-gather, and its INT8-activation per-window quantize
+// buffer (see their own docs for why each exists). This is the actual
+// verified maximum across every layer in the shipped decoder, not a padded
+// guess -- deliberately NOT given extra headroom the way kMaxKernelSize
+// above is, to keep these buffers' internal-RAM footprint tight (see
+// kWeightTileRows's doc for the internal-RAM-exhaustion story this
+// project's own history already warns about).
+//
+// These were plain STACK arrays (`float buf[kMaxRowSize]`) at first --
+// switched to InternalVector after a real ESP32-S3 crash (Guru Meditation,
+// "Stack canary watchpoint triggered (loopTask)") once the INT8-activation
+// path added one more such buffer: `conv1d()`'s tile lambda can run on the
+// calling thread directly (the Arduino main loopTask) rather than always on
+// TileSplitter's dedicated 16KB worker-task stack, and loopTask's own,
+// much smaller default stack was already mostly spent by the rest of the
+// synthesis call chain before conv1d() even runs. Internal-heap allocation
+// (same allocator wtile/wtile_i8 already use) sidesteps the question of
+// which thread's stack budget applies entirely.
 // Verified by direct runtime instrumentation across a full speak() call
 // (every conv1d()/convTranspose1d() call site, not just the ones a static
 // read of the model source suggested -- an earlier attempt at this bound,
@@ -243,17 +251,24 @@ inline int numWorkers() {
 
 /// `conv1d()`'s activation precision -- kFloat32 (default) matches every
 /// other op in this file; kInt8Activations quantizes activations to INT8
-/// per-timestep (symmetric, abs-max/127) and does a real INT8xINT8 dot
-/// product against the already-INT8 decoder weights (dtype 2, see
-/// WeightStore.h), rescaling the int32 result back to float once at the
-/// end -- a genuine speed/quality tradeoff, not just weights-only
-/// quantization's float-activation scheme. Only `conv1d()` honors this
-/// (see its own doc for why `convTranspose1d()` doesn't: its scatter
-/// pattern has no single dot-product primitive to swap in). On ESP32
-/// (TINYTTS_HAVE_ESP_DSP), the dot product itself runs as real SIMD
+/// per-timestep (symmetric, abs-max/127 over each input row independently)
+/// and does a real INT8xINT8 dot product against the already-INT8 decoder
+/// weights (dtype 2, see WeightStore.h), rescaling the int32 result back to
+/// float once at the end -- a genuine speed/quality tradeoff, not just
+/// weights-only quantization's float-activation scheme. Only `conv1d()`
+/// honors this (see its own doc for why `convTranspose1d()` doesn't: its
+/// scatter pattern has no single dot-product primitive to swap in). On
+/// ESP32 (TINYTTS_HAVE_ESP_DSP), the dot product itself runs as real SIMD
 /// (dsps_dp_s8); everywhere else it's the identical quantization math via
 /// a plain scalar loop -- same audible quality tradeoff, just not the
 /// speed one (see docs/desktop.md).
+///
+/// Deliberately per-ROW, not per-window (one shared scale across the whole
+/// k-tap receptive field, which is what conv1d()'s float32 path uses to
+/// fuse all k taps into a single dot-product call): per-window quantization
+/// was implemented and measured on real ESP32-S3 hardware, and reverted --
+/// see conv1d()'s `xq`/`x_scale` doc for the numbers. It was slower AND
+/// lower quality, not a tradeoff worth keeping.
 enum class DecoderPrecision { kFloat32, kInt8Activations };
 
 namespace detail {
@@ -313,6 +328,20 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
   // it once up front (rather than implicitly once per tile, the way the
   // float32 path re-reads x from PSRAM per tile) avoids num_tiles-fold
   // redundant quantization work.
+  //
+  // Deliberately per-ROW, not per-window: a per-window scale (one scale
+  // per receptive-field, matching float32's fused single-dot-product
+  // trick above) was tried and reverted -- it requires re-scanning/
+  // re-quantizing k*cin elements from scratch for every output timestep,
+  // redundantly per tile, instead of once per input row shared globally
+  // across every conv1d() call that reads it. Measured on real ESP32-S3
+  // hardware: ~78.3s decoder time, dramatically SLOWER than both this
+  // per-row scheme's own prior number (~51.5s dual-core) and float32's
+  // fused 29.8s -- the fused SIMD-call savings were completely swamped by
+  // the added quantization overhead. It was ALSO lower audio quality
+  // (18.36dB SNR / 0.9927 cosine similarity vs. this scheme's 23.37dB /
+  // 0.9977) -- worse on both axes, not a tradeoff, so not kept. See
+  // docs/performance.md for the full writeup.
   //
   // AlignedPsramVector, NOT PsramVector/InternalVector -- two distinct
   // requirements: (1) PSRAM, not internal RAM (InternalVector means
@@ -400,17 +429,28 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
           }
         }
       } else {
-        // Decode this row in its native [cin,k] order into a small stack
-        // scratch buffer, then transpose into wtile as [k,cin] -- lets the
+        // Decode this row in its native [cin,k] order into a small scratch
+        // buffer, then transpose into wtile as [k,cin] -- lets the
         // per-timestep dot product below run as ONE fully-contiguous call
         // over row_size (cin*k) elements instead of k separate
-        // strided/gathered calls, one per kernel tap. `rowbuf` is a fixed,
-        // reused-every-iteration STACK buffer (see kMaxRowSize's doc for
-        // why this isn't another heap allocation the size of the whole
-        // tile).
-        float rowbuf[kMaxRowSize];
+        // strided/gathered calls, one per kernel tap. `rowbuf` is
+        // internal-heap-backed (InternalVector, same allocator as
+        // wtile/wtile_i8), NOT a raw stack array -- a real ESP32-S3 stack
+        // overflow crash (Guru Meditation, "Stack canary watchpoint
+        // triggered") was hit with this and xtap below as a plain
+        // `float buf[kMaxRowSize]` stack array during INT8-fusion
+        // development: the calling thread here can be the Arduino main
+        // loopTask, whose default stack is much smaller than
+        // TileSplitter's dedicated 16KB worker-task stack (see
+        // kMaxRowSize's doc) -- unlike that worker stack, the main task's
+        // budget is already mostly spent by the rest of the synthesis call
+        // chain before conv1d() even runs. Resized once per tileRange()
+        // call (per-participant, matching wtile_i8's own doc for why that
+        // matters), not per-row/per-timestep.
+        InternalVector<float> rowbuf;
+        rowbuf.resize((size_t)kMaxRowSize);
         for (int r = 0; r < tile_rows; r++) {
-          w.decodeRun((size_t)(co0 + r) * row_size, row_size, rowbuf);
+          w.decodeRun((size_t)(co0 + r) * row_size, row_size, rowbuf.data());
           float* dst = wtile.data() + (size_t)r * row_size;
           for (int kk = 0; kk < k; kk++)
             for (int ci = 0; ci < cin; ci++) dst[(size_t)kk * cin + ci] = rowbuf[(size_t)ci * k + kk];
@@ -425,15 +465,18 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
       // up front would need a T*row_size buffer -- infeasible given T runs
       // into the tens of thousands of frames deep in the decoder's upsample
       // stages (see xq/x_scale's own doc above for the identical reasoning
-      // applied to activation quantization).
-      float xtap[kMaxRowSize];
+      // applied to activation quantization). Internal-heap-backed, not a
+      // stack array -- see rowbuf's doc just above for why (the real crash
+      // this caused).
+      InternalVector<float> xtap;
+      xtap.resize((size_t)kMaxRowSize);
       for (int t = 0; t < T; t++) {
         for (int kk = 0; kk < k; kk++) {
           int ti = t + kk * dilation - pad;
           bool valid = ti >= 0 && ti < T;
           xqrows[kk] = (use_int8 && valid) ? xq.data() + (size_t)ti * cin_padded : nullptr;
           if (!use_int8) {
-            float* dst = xtap + (size_t)kk * cin;
+            float* dst = xtap.data() + (size_t)kk * cin;
             if (valid)
               std::memcpy(dst, x.row(ti), (size_t)cin * sizeof(float));
             else
@@ -482,9 +525,9 @@ inline Mat conv1d(const Mat& x, const WeightStore::Entry& w, const std::vector<f
             const float* wrow = wtile.data() + (size_t)r * row_size;
             float dot = 0.0f;
 #ifdef TINYTTS_HAVE_ESP_DSP
-            dsps_dotprod_f32(xtap, wrow, &dot, (int)row_size);
+            dsps_dotprod_f32(xtap.data(), wrow, &dot, (int)row_size);
 #elif defined(TINYTTS_HAVE_NEON)
-            detail::neonDotProd(xtap, wrow, &dot, (int)row_size);
+            detail::neonDotProd(xtap.data(), wrow, &dot, (int)row_size);
 #else
             for (size_t i = 0; i < row_size; i++) dot += xtap[i] * wrow[i];
 #endif
@@ -541,16 +584,19 @@ inline Mat convTranspose1d(const Mat& x, const WeightStore::Entry& w, const std:
     for (int tile = tile0; tile < tile1; tile++) {
       int ci0 = tile * kWeightTileRows;
       int tile_rows = std::min(kWeightTileRows, cin - ci0);
-      // Decode each row in its native [cout,k] order into a small stack
-      // scratch buffer, then transpose into wtile as [k,cout] -- so the
-      // scatter loop below reads/writes contiguous cout-length runs for a
-      // fixed tap kk instead of a stride-k gather, mirroring conv1d()'s own
-      // weight transpose (see its doc for the same reasoning, including why
-      // this is a small reused STACK buffer, not another kWeightTileRows-
-      // sized heap one).
-      float rowbuf[kMaxRowSize];
+      // Decode each row in its native [cout,k] order into a small scratch
+      // buffer, then transpose into wtile as [k,cout] -- so the scatter
+      // loop below reads/writes contiguous cout-length runs for a fixed
+      // tap kk instead of a stride-k gather, mirroring conv1d()'s own
+      // weight transpose (see its doc for the same reasoning). Internal-
+      // heap-backed (InternalVector), NOT a raw stack array -- see
+      // conv1d()'s rowbuf doc for the real ESP32-S3 stack-overflow crash
+      // this class of buffer caused when it was a plain stack array on the
+      // Arduino main loopTask's much smaller stack.
+      InternalVector<float> rowbuf;
+      rowbuf.resize((size_t)kMaxRowSize);
       for (int r = 0; r < tile_rows; r++) {
-        w.decodeRun((size_t)(ci0 + r) * row_size, row_size, rowbuf);
+        w.decodeRun((size_t)(ci0 + r) * row_size, row_size, rowbuf.data());
         float* dst = wtile.data() + (size_t)r * row_size;
         for (int kk = 0; kk < k; kk++)
           for (int co = 0; co < cout; co++) dst[(size_t)kk * cout + co] = rowbuf[(size_t)co * k + kk];

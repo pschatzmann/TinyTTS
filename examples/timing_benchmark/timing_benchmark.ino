@@ -27,6 +27,12 @@ void setup() {
   tts.setWeights(default_weights, default_weights_len);
   tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
   tts.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
+#ifdef TINYTTS_BENCH_INT8
+  tts.setDecoderPrecision(tinytts::ops::DecoderPrecision::kInt8Activations);
+  Serial.println("Decoder precision: INT8 activations (fused, per-window quant)");
+#else
+  Serial.println("Decoder precision: float32 (default)");
+#endif
   if (!tts.begin([](const float*, size_t) { /* discard: timing only */ })) {
     Serial.println("TinyTTS.begin() failed -- did you call all setters above?");
     while (true) {}
