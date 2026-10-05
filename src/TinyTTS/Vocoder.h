@@ -111,7 +111,7 @@ class Vocoder {
 
   // Matches ConvResBlock.forward(): 3 (conv1(dilated) -> LeakyReLU ->
   // conv2(dilation=1)) residual pairs, no mask (single unpadded utterance).
-  static Mat resblockForward(const ResBlockWeights& rb, const Mat& x_in) {
+  TINYTTS_HOT static Mat resblockForward(const ResBlockWeights& rb, const Mat& x_in) {
     Mat x = x_in;
     for (int c = 0; c < 3; c++) {
       Mat xt = x;

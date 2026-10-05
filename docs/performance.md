@@ -498,6 +498,18 @@ fixed it.
 
 </details>
 
+## Tang Nano 20K: FPGA accelerator and a CPU without an FPU
+
+On the Sipeed Tang Nano 20K (picorv32 at 54MHz, no FPU) with Tools > AI Accelerator
+enabled, `conv1d()` (INT8 and float weights), `linear()` and `convTranspose1d()` run their
+dot products on the core's on-chip INT8 engine, and the remaining hot loops run from
+internal SRAM with integer arithmetic (`TINYTTS_HOT`, `TINYTTS_FIXED_POINT`). Measured
+there: "Hello world!" went from 100 to 34 minutes over those steps, about 1,400 times
+slower than real time. The one change that also helps other platforms: attention's
+relative-position terms are only computed inside their +-4-frame window, where the
+embeddings are non-zero (exact, about half of attention's work for long inputs). See
+`docs/tangnano20k.md`.
+
 ## What was tried and didn't work (or wasn't worth it)
 
 ### DMA-prefetching weight tiles from flash: reverted, silently corrupted data

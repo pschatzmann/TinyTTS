@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <random>
 #include <string>
@@ -10,7 +11,6 @@
 #include <Arduino.h>
 #else
 #include <chrono>
-#include <cstdio>
 #endif
 
 #include "TinyTTS/Alignment.h"
@@ -28,7 +28,7 @@ namespace tinytts {
 
 // Portable stage-timing helper: wall-clock milliseconds and a matching
 // print, so synthesize()'s per-stage breakdown below works identically on
-// Arduino (Serial.printf) and a plain host build (printf) -- useful on
+// Arduino (Serial) and a plain host build (printf) -- useful on
 // device to see where time actually goes, and on host to get a baseline
 // without needing hardware at all.
 inline uint32_t timingMillis() {
@@ -43,7 +43,11 @@ inline uint32_t timingMillis() {
 template <typename... Args>
 inline void timingLog(const char* fmt, Args... args) {
 #ifdef ARDUINO
-  Serial.printf(fmt, args...);
+  // snprintf + print rather than Serial.printf(), which is an ESP32/RP2040
+  // extension many Arduino cores don't have.
+  char buf[96];
+  snprintf(buf, sizeof(buf), fmt, args...);
+  Serial.print(buf);
 #else
   // stderr, not stdout: a host build (e.g. desktop/DesktopMain.h) may write
   // real audio data to stdout for piping (`tinytts_desktop ... --stdout |
@@ -149,7 +153,16 @@ class TinyTTSCore {
     // pad_start_end step), then insertBlanks() interleaves a '_' between
     // EVERY symbol on top of that (commons.insert_blanks) -- both stages
     // are real and both are required, not redundant.
-    G2POutput g2p_out = g2p_.process(text);
+#ifdef TINYTTS_PROFILE
+    profile::reset();
+#endif
+    uint32_t t_g2p0 = timingMillis();
+    G2POutput g2p_out;
+    {
+      TINYTTS_PROFILE_SCOPE(kG2P);
+      g2p_out = g2p_.process(text);
+    }
+    timingLog("[TinyTTS] g2p: %lu ms\n", (unsigned long)(timingMillis() - t_g2p0));
     std::vector<int> phone_ids = TextG2P::insertBlanks(g2p_out.phone_ids);
     std::vector<int> tone_ids = TextG2P::insertBlanks(g2p_out.tone_ids);
     std::vector<int> language_ids = TextG2P::insertBlanks(g2p_out.language_ids);
@@ -185,6 +198,15 @@ class TinyTTSCore {
     auto audio = vocoder_.forward(z, g);
     timingLog("[TinyTTS] vocoder: %lu ms, samples=%u\n", (unsigned long)(timingMillis() - t_dec0),
               (unsigned)audio.size());
+
+#ifdef TINYTTS_PROFILE
+    for (int i = 0; i < profile::kSlotCount; i++) {
+      const profile::Total& t = profile::totals()[i];
+      if (t.calls == 0) continue;
+      timingLog("[TinyTTS] profile %s: %lu ms in %lu calls\n", profile::slotName(i),
+                (unsigned long)(t.us / 1000), (unsigned long)t.calls);
+    }
+#endif
 
     if (on_audio) on_audio(audio.data(), audio.size());
 

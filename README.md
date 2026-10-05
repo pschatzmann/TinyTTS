@@ -38,6 +38,7 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
 | [`docs/requirements.md`](docs/requirements.md) | Board/library requirements -- flash/PSRAM sizing, board settings, the optional SIMD speedup. |
 | [`docs/model-data.md`](docs/model-data.md) | Model data sizes, how to wire up weights/dictionary buffers, where the data comes from. |
 | [`docs/esp-idf.md`](docs/esp-idf.md) | Building TinyTTS as a plain ESP-IDF component instead of an Arduino library. |
+| [`docs/tangnano20k.md`](docs/tangnano20k.md) | Running on the Sipeed Tang Nano 20K FPGA board, including its on-chip INT8 accelerator. |
 | [`docs/desktop.md`](docs/desktop.md) | The `desktop/` CLI (`tinytts`) -- building, installing, running, Unix piping. |
 | [`docs/performance.md`](docs/performance.md) | Real-hardware optimization history: what worked, what didn't, and why. |
 | [`docs/potential-improvements.md`](docs/potential-improvements.md) | What's still open for moving TinyTTS closer to real-time synthesis. |

@@ -83,6 +83,12 @@ tts.setDictionaryModel(default_dictionary_model, default_dictionary_model_len);
 tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
 ```
 
+The generated arrays are declared `TINYTTS_PROGMEM` (`src/TinyTTS/DataAttr.h`): `PROGMEM` on
+Arduino, empty elsewhere. That changes nothing on ESP32 (whose `PROGMEM` is empty) but puts
+the data in flash instead of RAM on cores that have a separate constant-data area, such as
+the Tang Nano 20K (see `docs/tangnano20k.md`). Define `TINYTTS_PROGMEM` yourself before
+including the data headers to override it.
+
 ## Where it comes from
 
 `research/` has the Python tooling that produces this data — `export_weights_and_vectors.py`

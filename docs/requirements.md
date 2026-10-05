@@ -30,10 +30,11 @@ to the desktop build, and vice versa.
   it — directly inside this library's own `src/int8-dotprod/` tree, so Arduino picks it
   up automatically like any other TinyTTS header, nothing to install separately; see
   `src/int8-dotprod/NOTICE.md` for what it is.
-- **Chip family**: ESP32 only (`library.properties` scopes it to the `esp32` architecture).
-  None of the model code is chip-specific, but `DataBuffer`'s `File`-loading path uses
-  ESP32's own PSRAM allocator directly, and the multi-megabyte weight/dictionary data needs a
-  module with real PSRAM either way -- see `docs/limitations.md`.
+- **Chip family**: ESP32 is the tested and tuned target. The library also builds for the
+  Sipeed Tang Nano 20K (`tangnano20k` architecture) as an experiment -- different board
+  settings, and an optional on-chip INT8 accelerator; see `docs/tangnano20k.md`. None of the
+  model code is chip-specific, but the multi-megabyte weight/dictionary data needs a board
+  with that much flash and RAM either way -- see `docs/limitations.md`.
 
 Building as a plain ESP-IDF component (no Arduino dependency) is also supported -- see
 `docs/esp-idf.md`. For model data sizes and how to wire weights/dictionary buffers up, see

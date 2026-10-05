@@ -4,8 +4,18 @@
 #include <new>
 #include <vector>
 
+#include "TinyTTS/AllocFailure.h"
+
 #ifdef ESP32
 #include <esp_heap_caps.h>
+#endif
+
+// std::aligned_alloc needs C++17 and a C library that provides it
+// (libstdc++ reports the latter as _GLIBCXX_HAVE_ALIGNED_ALLOC).
+#if __cplusplus >= 201703L && (!defined(__GLIBCXX__) || defined(_GLIBCXX_HAVE_ALIGNED_ALLOC))
+#define TINYTTS_HAVE_ALIGNED_ALLOC 1
+#else
+#define TINYTTS_HAVE_ALIGNED_ALLOC 0
 #endif
 
 namespace tinytts {
@@ -30,8 +40,13 @@ struct AlignedPsramAllocator {
   static void* allocate(size_t n) {
 #ifdef ESP32
     return heap_caps_aligned_alloc(kSimdAlign, n, MALLOC_CAP_SPIRAM);
-#else
+#elif TINYTTS_HAVE_ALIGNED_ALLOC
     return std::aligned_alloc(kSimdAlign, n);
+#else
+    // No std::aligned_alloc (pre-C++17, or a libc such as a bare-metal
+    // newlib that doesn't declare it): the 16-byte alignment only matters
+    // for the ESP32-S3 SIMD path, so plain malloc is enough here.
+    return std::malloc(n);
 #endif
   }
   static void deallocate(void* p) {
@@ -47,8 +62,13 @@ struct AlignedInternalAllocator {
   static void* allocate(size_t n) {
 #ifdef ESP32
     return heap_caps_aligned_alloc(kSimdAlign, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-#else
+#elif TINYTTS_HAVE_ALIGNED_ALLOC
     return std::aligned_alloc(kSimdAlign, n);
+#else
+    // No std::aligned_alloc (pre-C++17, or a libc such as a bare-metal
+    // newlib that doesn't declare it): the 16-byte alignment only matters
+    // for the ESP32-S3 SIMD path, so plain malloc is enough here.
+    return std::malloc(n);
 #endif
   }
   static void deallocate(void* p) {
@@ -78,7 +98,7 @@ struct AlignedStlAllocator {
   T* allocate(std::size_t n) {
     if (n == 0) return nullptr;
     void* p = Base::allocate(n * sizeof(T));
-    if (!p) throw std::bad_alloc();
+    if (!p) allocFailed();
     return static_cast<T*>(p);
   }
   void deallocate(T* p, std::size_t) noexcept { Base::deallocate(p); }

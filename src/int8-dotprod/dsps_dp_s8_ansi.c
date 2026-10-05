@@ -1,3 +1,4 @@
+#ifdef ESP32  // vendored esp-dsp code: needs ESP-IDF headers
 #include "dsps_dotprod.h"
 
 esp_err_t dsps_dp_s8_ansi(const int8_t *src1, const int8_t *src2, int32_t *dest, int len)
@@ -9,3 +10,4 @@ esp_err_t dsps_dp_s8_ansi(const int8_t *src1, const int8_t *src2, int32_t *dest,
     *dest = acc;
     return ESP_OK;
 }
+#endif  // ESP32

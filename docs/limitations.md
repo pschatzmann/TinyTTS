@@ -12,7 +12,7 @@
 - **This project tests and tunes for one board** (the `partitions.csv` shipped alongside
   the example, the board settings in `docs/requirements.md`, etc.), even though none of the
   model code itself is chip-specific. `DataBuffer`'s `File`-loading path uses ESP32's own
-  PSRAM allocator directly, `library.properties` scopes the library to the `esp32`
-  architecture family, and the model's multi-megabyte weight/dictionary data needs a module
-  with real PSRAM -- so this isn't a "runs on any microcontroller" library, just one with no
-  inference-runtime dependency within that family.
+  PSRAM allocator where available, and the model's multi-megabyte weight/dictionary data
+  needs a board with that much flash and RAM -- so this isn't a "runs on any
+  microcontroller" library. The Sipeed Tang Nano 20K (`docs/tangnano20k.md`) also builds and
+  links, but hasn't been run on the board yet.

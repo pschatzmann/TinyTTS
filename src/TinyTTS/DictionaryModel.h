@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "TinyTTS/Profile.h"
+
 namespace tinytts {
 
 /**
@@ -82,6 +84,7 @@ class DictionaryModel {
   /// sequence, empty if decoding somehow ran the full 20-step cap without
   /// emitting </s> (not observed in practice, but not assumed impossible).
   std::vector<Phoneme> predict(const std::string& word) const {
+    TINYTTS_PROFILE_SCOPE(kDictionaryModel);
     std::vector<float> h(hidden_dim_, 0.0f);
     for (char c : word) {
       gruStep(embRow(enc_emb_, graphemeIndex(c)), h, enc_w_ih_, enc_w_hh_, enc_b_ih_, enc_b_hh_);

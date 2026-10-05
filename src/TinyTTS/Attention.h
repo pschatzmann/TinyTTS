@@ -42,48 +42,24 @@ class Attention {
     window_size_ = window_size;
   }
 
-  Mat forward(const Mat& x) const {
+  TINYTTS_HOT Mat forward(const Mat& x) const {
     int t_len = x.rows();
     int c = x.cols();
-    int h = n_heads_, k = k_channels_;
-    float scale = 1.0f / std::sqrt((float)k);
 
     Mat q = ops::linear(x, conv_q_, bias_q_);
     Mat key = ops::linear(x, conv_k_, bias_k_);
     Mat v = ops::linear(x, conv_v_, bias_v_);
 
-    Mat rel_k = relativeEmbeddings(emb_rel_k_, t_len);
-    Mat rel_v = relativeEmbeddings(emb_rel_v_, t_len);
-    int width = 2 * t_len - 1;
-
     Mat merged(t_len, c);
-    Mat scores(t_len, t_len);
-
-    for (int head = 0; head < h; head++) {
-      int off = head * k;
-      for (int i = 0; i < t_len; i++) {
-        for (int j = 0; j < t_len; j++) {
-          float acc = 0.0f;
-          for (int ch = 0; ch < k; ch++) acc += q.at(i, off + ch) * key.at(j, off + ch);
-          int r = j - i + (t_len - 1);
-          float rel_acc = 0.0f;
-          for (int ch = 0; ch < k; ch++) rel_acc += q.at(i, off + ch) * rel_k.at(r, ch);
-          scores.at(i, j) = (acc + rel_acc) * scale;
-        }
-      }
-      for (int i = 0; i < t_len; i++) ops::softmaxInplace(scores.row(i), t_len);
-
-      for (int i = 0; i < t_len; i++) {
-        for (int ch = 0; ch < k; ch++) {
-          float acc = 0.0f;
-          for (int j = 0; j < t_len; j++) acc += scores.at(i, j) * v.at(j, off + ch);
-          for (int r = 0; r < width; r++) {
-            int j = i + r - (t_len - 1);
-            if (j < 0 || j >= t_len) continue;
-            acc += scores.at(i, j) * rel_v.at(r, ch);
-          }
-          merged.at(i, off + ch) = acc;
-        }
+    {
+      TINYTTS_PROFILE_SCOPE(kAttentionScores);
+      Mat scores(t_len, t_len);
+      for (int head = 0; head < n_heads_; head++) {
+#ifdef TINYTTS_FIXED_POINT
+        headFixed(q, key, v, head, scores, merged);
+#else
+        headFloat(q, key, v, head, scores, merged);
+#endif
       }
     }
 
@@ -93,21 +69,122 @@ class Attention {
   int outChannels() const { return conv_o_.rows(); }
 
  private:
-  // table: [2*window_size+1, k_channels] entries for relative offsets
-  // [-window_size .. +window_size]. Returns [2T-1, k_channels] for offsets
-  // [-(T-1) .. +(T-1)], zero for any offset beyond the trained window.
-  Mat relativeEmbeddings(const Mat& table, int t_len) const {
-    int width = 2 * t_len - 1;
-    Mat result(width, table.cols(), 0.0f);
-    for (int r = 0; r < width; r++) {
-      int offset = r - (t_len - 1);
-      if (offset >= -window_size_ && offset <= window_size_) {
-        int tidx = offset + window_size_;
-        for (int c = 0; c < table.cols(); c++) result.at(r, c) = table.at(tidx, c);
+  // The relative-position embeddings emb_rel_k_/emb_rel_v_ have one row per
+  // offset j - i in [-window_size_, window_size_] (row offset +
+  // window_size_) and are zero beyond that, so both heads below only visit
+  // |j - i| <= window_size_ for them - the same result as looping over all
+  // 2T-1 offsets, at a fraction of the work for long inputs.
+
+  /// One head in float: scores = softmax((q.k + q.rel_k) / sqrt(k)),
+  /// merged = scores.v + scores.rel_v.
+  TINYTTS_HOT void headFloat(const Mat& q, const Mat& key, const Mat& v, int head, Mat& scores,
+                             Mat& merged) const {
+    int t_len = q.rows(), k = k_channels_, off = head * k, w = window_size_;
+    float scale = 1.0f / std::sqrt((float)k);
+    for (int i = 0; i < t_len; i++) {
+      const float* qi = q.row(i) + off;
+      float* si = scores.row(i);
+      for (int j = 0; j < t_len; j++) {
+        const float* kj = key.row(j) + off;
+        float acc = 0.0f;
+        for (int ch = 0; ch < k; ch++) acc += qi[ch] * kj[ch];
+        int d = j - i;
+        if (d >= -w && d <= w) {
+          const float* rk = emb_rel_k_.row(d + w);
+          for (int ch = 0; ch < k; ch++) acc += qi[ch] * rk[ch];
+        }
+        si[j] = acc * scale;
+      }
+      ops::softmaxInplace(si, t_len);
+    }
+    for (int i = 0; i < t_len; i++) {
+      const float* si = scores.row(i);
+      float* mi = merged.row(i) + off;
+      for (int ch = 0; ch < k; ch++) {
+        float acc = 0.0f;
+        for (int j = 0; j < t_len; j++) acc += si[j] * v.at(j, off + ch);
+        for (int d = -w; d <= w; d++) {
+          int j = i + d;
+          if (j < 0 || j >= t_len) continue;
+          acc += si[j] * emb_rel_v_.at(d + w, ch);
+        }
+        mi[ch] = acc;
       }
     }
-    return result;
   }
+
+#ifdef TINYTTS_FIXED_POINT
+  /// Quantizes rows x cols values (row stride `stride`) to 16 bits with one
+  /// shared scale; returns the scale (value ~= q * scale).
+  static float quantize16(const float* src, int rows, int cols, int stride, std::vector<int16_t>& out) {
+    float m = 0.0f;
+    for (int r = 0; r < rows; r++) m = std::max(m, ops::detail::absMaxBits(src + (size_t)r * stride, cols));
+    float s = m > 0.0f ? m / 32767.0f : 1.0f;
+    float inv = 1.0f / s;
+    out.resize((size_t)rows * cols);
+    for (int r = 0; r < rows; r++)
+      for (int ch = 0; ch < cols; ch++) {
+        float x = src[(size_t)r * stride + ch] * inv;
+        out[(size_t)r * cols + ch] = (int16_t)(x + (x >= 0.0f ? 0.5f : -0.5f));
+      }
+    return s;
+  }
+
+  /// One head as headFloat(), with the dot products in integers (see
+  /// TINYTTS_FIXED_POINT in Ops.h): q, k, v and the relative embeddings as
+  /// 16-bit values with one scale each, the softmax weights as Q15, sums in
+  /// 64 bits - one float conversion per score and per output instead of a
+  /// float multiply and add per term.
+  TINYTTS_HOT void headFixed(const Mat& q, const Mat& key, const Mat& v, int head, Mat& scores,
+                             Mat& merged) const {
+    int t_len = q.rows(), k = k_channels_, off = head * k, w = window_size_;
+    int nrel = 2 * w + 1;
+    std::vector<int16_t> qq, kq, vq, rkq, rvq, sw((size_t)t_len);
+    float sqs = quantize16(q.data().data() + off, t_len, k, q.cols(), qq);
+    float sks = quantize16(key.data().data() + off, t_len, k, key.cols(), kq);
+    float svs = quantize16(v.data().data() + off, t_len, k, v.cols(), vq);
+    float srk = quantize16(emb_rel_k_.data().data(), nrel, k, emb_rel_k_.cols(), rkq);
+    float srv = quantize16(emb_rel_v_.data().data(), nrel, k, emb_rel_v_.cols(), rvq);
+    float scale = 1.0f / std::sqrt((float)k);
+    float f_qk = sqs * sks * scale, f_qr = sqs * srk * scale;
+    for (int i = 0; i < t_len; i++) {
+      const int16_t* qi = qq.data() + (size_t)i * k;
+      float* si = scores.row(i);
+      for (int j = 0; j < t_len; j++) {
+        const int16_t* kj = kq.data() + (size_t)j * k;
+        int64_t acc = 0;
+        for (int ch = 0; ch < k; ch++) acc += (int32_t)qi[ch] * kj[ch];
+        float sc = (float)acc * f_qk;
+        int d = j - i;
+        if (d >= -w && d <= w) {
+          const int16_t* rk = rkq.data() + (size_t)(d + w) * k;
+          int64_t racc = 0;
+          for (int ch = 0; ch < k; ch++) racc += (int32_t)qi[ch] * rk[ch];
+          sc += (float)racc * f_qr;
+        }
+        si[j] = sc;
+      }
+      ops::softmaxInplace(si, t_len);
+    }
+    const float f_v = svs / 32767.0f, f_rv = srv / 32767.0f;
+    for (int i = 0; i < t_len; i++) {
+      const float* si = scores.row(i);
+      for (int j = 0; j < t_len; j++) sw[j] = (int16_t)(si[j] * 32767.0f + 0.5f);  // softmax output is in [0, 1]
+      float* mi = merged.row(i) + off;
+      for (int ch = 0; ch < k; ch++) {
+        int64_t acc = 0;
+        for (int j = 0; j < t_len; j++) acc += (int32_t)sw[j] * vq[(size_t)j * k + ch];
+        int64_t racc = 0;
+        for (int d = -w; d <= w; d++) {
+          int j = i + d;
+          if (j < 0 || j >= t_len) continue;
+          racc += (int32_t)sw[j] * rvq[(size_t)(d + w) * k + ch];
+        }
+        mi[ch] = (float)acc * f_v + (float)racc * f_rv;
+      }
+    }
+  }
+#endif
 
   Mat conv_q_, conv_k_, conv_v_, conv_o_;
   std::vector<float> bias_q_, bias_k_, bias_v_, bias_o_;

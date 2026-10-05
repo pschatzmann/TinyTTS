@@ -30,9 +30,9 @@ def to_header(path, out_path, varname, comment):
     data = open(path, "rb").read()
     with open(out_path, "w") as f:
         f.write(comment)
-        f.write("#pragma once\n#include <cstddef>\n#include <cstdint>\n\n")
+        f.write("#pragma once\n#include <cstddef>\n#include <cstdint>\n\n#include \"TinyTTS/DataAttr.h\"\n\n")
         f.write("namespace tinytts {\n\n")
-        f.write(f"inline const unsigned char {varname}[] =\n")
+        f.write(f"inline const unsigned char {varname}[] TINYTTS_PROGMEM =\n")
         line_bytes = 32
         for i in range(0, len(data), line_bytes):
             chunk = data[i : i + line_bytes]

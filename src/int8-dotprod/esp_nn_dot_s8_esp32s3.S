@@ -1,3 +1,9 @@
+// ESP32-S3 only (PIE SIMD instructions): skip on every other target
+#ifdef ESP32
+#include "sdkconfig.h"
+#endif
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+
 //
 // SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
 //
@@ -140,3 +146,5 @@ esp_nn_dot_s8_unaligned_esp32s3:
     retw.n
 
     .size   esp_nn_dot_s8_unaligned_esp32s3, . - esp_nn_dot_s8_unaligned_esp32s3
+
+#endif  // CONFIG_IDF_TARGET_ESP32S3

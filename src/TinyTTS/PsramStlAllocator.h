@@ -3,6 +3,8 @@
 #include <new>
 #include <vector>
 
+#include "TinyTTS/AllocFailure.h"
+
 #include "TinyTTS/DataBuffer.h"
 
 namespace tinytts {
@@ -32,7 +34,7 @@ struct PsramStlAllocator {
   T* allocate(std::size_t n) {
     if (n == 0) return nullptr;
     void* p = PsramAllocator::allocate(n * sizeof(T));
-    if (!p) throw std::bad_alloc();
+    if (!p) allocFailed();
     return static_cast<T*>(p);
   }
   void deallocate(T* p, std::size_t) noexcept { PsramAllocator::deallocate(p); }
