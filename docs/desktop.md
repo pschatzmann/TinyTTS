@@ -103,6 +103,10 @@ Voice tuning:
   --full-dict           Use the full CMU dictionary instead of the slimmed one (still
                         paired with the neural G2P fallback) -- see docs/model-data.md
                         for why slimmed+G2P is the recommended default even so.
+  --weights FILE        Load model weights (a weights.bin from
+                        research/export_weights_and_vectors.py) from FILE instead of the
+                        compiled-in default model -- e.g. a model you trained yourself,
+                        see docs/training.md.
   --decoder-precision full|int8
                         default full. 'int8' quantizes the decoder's conv1d() activations
                         to INT8 for an INT8xINT8 dot product -- audibly lossier on any

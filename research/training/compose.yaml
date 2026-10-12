@@ -1,0 +1,42 @@
+# docker compose for the TinyTTS training image -- run from research/training/:
+#
+#   docker compose run --rm train-cpu train --config configs/en_ljspeech.json
+#   docker compose run --rm train-gpu train --config configs/en_ljspeech.json --disc-width 1.0
+#
+# ./data and ./runs are mounted, so datasets and checkpoints live on the host
+# (same paths as a non-Docker setup) and --resume works across containers and
+# machines. Files are written as UID/GID (default 1000:1000; `export UID GID`
+# first if yours differ).
+x-train: &train
+  volumes:
+    - ./data:/research/training/data
+    - ./runs:/research/training/runs
+  user: "${UID:-1000}:${GID:-1000}"
+  shm_size: 2gb  # DataLoader workers pass batches through /dev/shm (Docker default: 64 MB)
+  init: true     # Ctrl-C reaches train.py cleanly
+
+services:
+  train-cpu:
+    <<: *train
+    image: tinytts-train:cpu
+    build:
+      context: ..
+      dockerfile: training/docker/Dockerfile
+      args:
+        TORCH_VARIANT: cpu
+
+  train-gpu:
+    <<: *train
+    image: tinytts-train:cu126
+    build:
+      context: ..
+      dockerfile: training/docker/Dockerfile
+      args:
+        TORCH_VARIANT: cu126
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

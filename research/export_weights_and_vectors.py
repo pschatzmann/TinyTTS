@@ -30,6 +30,7 @@ WeightStore.h parses both:
     audio quality and TFLite Micro's "hybrid model" rejection (the reason
     that scheme wasn't used originally) doesn't apply to hand-written code.
 """
+import argparse
 import os
 import struct
 import sys
@@ -43,16 +44,19 @@ from tiny_tts.models import VoiceSynthesizer
 from tiny_tts.text.symbols import symbols
 from tiny_tts.utils import SPEC_CHANNELS, SEGMENT_FRAMES, N_SPEAKERS, MODEL_PARAMS
 
-OUT_DIR = os.path.dirname(__file__)
+OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-def load_model():
+def load_model(ckpt_path=None):
+    """ckpt_path: a G_*.pth (e.g. from training/train.py); default is the
+    released HuggingFace checkpoint the shipped weights come from."""
     net_g = VoiceSynthesizer(
         len(symbols), SPEC_CHANNELS, SEGMENT_FRAMES, n_speakers=N_SPEAKERS, **MODEL_PARAMS
     )
-    from huggingface_hub import hf_hub_download
+    if ckpt_path is None:
+        from huggingface_hub import hf_hub_download
 
-    ckpt_path = hf_hub_download("backtracking/tiny-tts", "G.pth")
+        ckpt_path = hf_hub_download("backtracking/tiny-tts", "G.pth")
     ckpt = torch.load(ckpt_path, map_location="cpu")
     net_g.load_state_dict(ckpt["model"], strict=False)
     net_g.eval()
@@ -133,7 +137,14 @@ UNUSED_BERT_PROJ_WEIGHTS = {"enc_p.bert_proj.weight", "enc_p.ja_bert_proj.weight
 
 
 def main():
-    net_g = load_model()
+    parser = argparse.ArgumentParser(description="Export weights.bin + test_vectors.bin from a G checkpoint.")
+    parser.add_argument("--checkpoint", help="G_*.pth to export (default: HF backtracking/tiny-tts G.pth)")
+    parser.add_argument("--out-dir", default=OUT_DIR, help=f"output directory (default: {OUT_DIR})")
+    args = parser.parse_args()
+    out_dir = args.out_dir
+    os.makedirs(out_dir, exist_ok=True)
+
+    net_g = load_model(args.checkpoint)
 
     # Every Conv1d/ConvTranspose1d weight in `decoder` -- matches
     # validate_decoder_int8.py's scope exactly, so what got accuracy-checked
@@ -145,7 +156,7 @@ def main():
     }
 
     export_state_dict_subset(
-        net_g, ["enc_p.", "flow.", "emb_g.", "dp.", "dec."], os.path.join(OUT_DIR, "weights.bin"),
+        net_g, ["enc_p.", "flow.", "emb_g.", "dp.", "dec."], os.path.join(out_dir, "weights.bin"),
         exclude=UNUSED_BERT_PROJ_WEIGHTS, dtype="float16", quantize_rows_of=decoder_quantized_weights,
     )
     print(f"quantized {len(decoder_quantized_weights)} decoder Conv1d/ConvTranspose1d weight tensors to INT8")
@@ -188,7 +199,7 @@ def main():
         z_pt = net_g.flow(z_p_pt, y_mask_pt, g=g, reverse=True)
         audio_pt = net_g.dec(z_pt, g=g)
 
-    with open(os.path.join(OUT_DIR, "test_vectors.bin"), "wb") as f:
+    with open(os.path.join(out_dir, "test_vectors.bin"), "wb") as f:
         write_tensor(f, "phone_ids", phone_ids.numpy())
         write_tensor(f, "phone_lengths", phone_lengths.numpy())
         write_tensor(f, "tone_ids", tone_ids.numpy())

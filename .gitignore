@@ -5,6 +5,10 @@ research/venv/
 # https://github.com/tronghieuit/tiny-tts into research/tiny-tts)
 research/tiny-tts/
 
+# Training datasets/checkpoints (regenerate: see docs/training.md)
+research/training/data/
+research/training/runs/
+
 __pycache__/
 *.pyc
 

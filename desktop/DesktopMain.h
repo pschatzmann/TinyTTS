@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -96,7 +97,16 @@ class DesktopMain {
       }
     }
 
-    tts_.setWeights(default_weights, default_weights_len);
+    if (opt.weights_file.empty()) {
+      tts_.setWeights(default_weights, default_weights_len);
+    } else {
+      // A weights.bin from research/export_weights_and_vectors.py (e.g. a
+      // model trained with research/training/) -- lets a new checkpoint be
+      // listened to without regenerating src/TinyTTS/data/*_data.h.
+      // setWeights() borrows the buffer, so it lives in a member.
+      if (!readFile(opt.weights_file, weights_buf_)) return 1;
+      tts_.setWeights(weights_buf_.data(), weights_buf_.size());
+    }
     if (opt.full_dict) {
       // The full dictionary instead of the slimmed one -- still paired
       // with the neural G2P fallback (for whatever even the full
@@ -181,6 +191,7 @@ class DesktopMain {
     float length_scale = 1.0f;
     int speaker = 0;
     int threads = 2;  // matches TinyTTS::setNumWorkers()'s own default
+    std::string weights_file;
     bool full_dict = false;
     bool decoder_int8 = false;
     bool help_requested = false;
@@ -213,6 +224,9 @@ class DesktopMain {
                   "                        one (still paired with the neural G2P fallback) --\n"
                   "                        see docs/model-data.md for why slimmed+G2P is the\n"
                   "                        recommended default even so.\n"
+                  "  --weights FILE        Load model weights (weights.bin, see\n"
+                  "                        docs/training.md) from FILE instead of the\n"
+                  "                        compiled-in default model.\n"
                   "  --decoder-precision full|int8\n"
                   "                        default full. 'int8' quantizes the decoder's conv1d\n"
                   "                        activations to INT8 for a real INT8xINT8 dot product\n"
@@ -272,6 +286,10 @@ class DesktopMain {
         const char* v = next(a.c_str());
         if (!v) return false;
         opt.threads = std::atoi(v);
+      } else if (a == "--weights") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.weights_file = v;
       } else if (a == "--full-dict") {
         opt.full_dict = true;
       } else if (a == "--decoder-precision") {
@@ -371,6 +389,17 @@ class DesktopMain {
     return true;
   }
 
+  /// Reads a whole binary file (--weights) into `out`.
+  static bool readFile(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+      std::fprintf(stderr, "cannot open %s\n", path.c_str());
+      return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+  }
+
   // Same RIFF/WAVE header layout as test/main.cpp's write_wav(), just
   // targeting an arbitrary ostream (a file or std::cout) instead of always
   // a path, so -o/--output and --stdout can share one implementation. Volume
@@ -462,6 +491,9 @@ class DesktopMain {
 
   audio_tools::MiniAudioStream out_;
   audio_tools::BufferedStream buffered_out_{out_, kWriteChunkBytes};
+  // --weights data; declared before tts_ so it outlives it (setWeights()
+  // borrows the pointer).
+  std::vector<uint8_t> weights_buf_;
   TinyTTS tts_;
   std::vector<int16_t> pcm_buf_;
   std::vector<float> all_samples_;

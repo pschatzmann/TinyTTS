@@ -1,0 +1,13 @@
+# Training-only environment (no TensorFlow/onnx2tf needed -- see
+# ../requirements-frozen.txt for the full research/ environment).
+# CPU-only torch, smaller download:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+torchaudio>=2.2
+numpy
+soundfile
+numba
+g2p-en
+nltk
+transformers
+huggingface_hub
