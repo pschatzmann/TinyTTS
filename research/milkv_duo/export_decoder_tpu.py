@@ -3,12 +3,23 @@ Exports the vocoder (`net_g.dec`) as a fixed-shape ONNX window for the
 Milk-V Duo 256M / Duo S TPU (SG2002/SG2000, TPU-MLIR chip `cv181x`), and
 produces everything TPU-MLIR needs to compile and check it:
 
-  out/decoder_w{W}.onnx       z [1, 32, W], g [1, 128, 1], mask [1, 1, W]
-                              -> audio [1, 1, W*512]
-  out/calib/*.npz             real decoder input windows, for run_calibration
-  out/test_input.npz          one window, for model_deploy --test_input
-  out/test_ref.npz            its float32 PyTorch output, for --test_reference
-  out/utterances.npz          whole-utterance z/g/audio, for validate_cvimodel.py
+  out/<name>.onnx             z [1, 32, W], g [1, 128, 1], mask [1, 1, W]
+                              -> audio [1, 1, W*hop]
+  out/<name>_calib/*.npz      real decoder input windows, for run_calibration
+  out/<name>_test_input.npz   one window, for model_deploy --test_input
+  out/<name>_test_ref.npz     its float32 PyTorch output, for --test_reference
+  out/<name>_utterances.npz   whole-utterance z/g/audio plus hop, sample rate,
+                              window and context, for validate_cvimodel.py
+
+<name> is decoder_<sample rate>hz_w<W>, e.g. decoder_44100hz_w128. The sample
+rate is in the name because a decoder only fits the weights.bin of the same
+checkpoint (CviTpuVocoder::checkModel() compares it with the loaded weights).
+
+--checkpoint takes a G_*.pth from research/training/ (default: the released
+44.1 kHz model). Its sample rate, hop (output samples per frame) and vocoder
+upsample stack come from the checkpoint (training/audio_config.py), as in
+export_weights_and_vectors.py -- export the weights.bin and the TPU models from
+the same checkpoint.
 
 TPU-MLIR's CV18xx backend only compiles static shapes, so the C++ side
 (src/TinyTTS/ChunkedVocoder.h) runs an utterance as a series of W-frame
@@ -39,13 +50,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from export_split_onnx import load_model
-from tiny_tts.utils import MODEL_PARAMS
+import export_weights_and_vectors
 from tiny_tts.nn import commons, modules
 from tiny_tts.text import phonemes_to_ids
 from tiny_tts.text.english import grapheme_to_phoneme, normalize_text
-
-HOP = 512  # product of upsample_rates (8*8*2*2*2): output samples per frame
 
 # Varied length, punctuation and phoneme content: the calibration set decides
 # the INT8 activation ranges, so it should look like real use.
@@ -71,6 +79,11 @@ SENTENCES = [
     "A journey of a thousand miles begins with a single step.",
     "Error: could not connect to the network.",
 ]
+
+
+def load_checkpoint(path=None):
+    """(net_g, AudioConfig) for a G_*.pth, or the released 44.1 kHz model if `path` is None."""
+    return export_weights_and_vectors.load_model(path)
 
 
 def text_to_inputs(text):
@@ -117,14 +130,14 @@ def windows(z, W, context):
         yield s, win, mask
 
 
-def chunked_decode(dec_fn, z, g, W, context):
+def chunked_decode(dec_fn, z, g, W, context, hop):
     T = z.shape[2]
     core = W - 2 * context
-    out = np.zeros(T * HOP, dtype=np.float32)
+    out = np.zeros(T * hop, dtype=np.float32)
     for s, win, mask in windows(z, W, context):
         audio = dec_fn(win, g, mask).reshape(-1)
         n = min(core, T - s)
-        out[s * HOP : (s + n) * HOP] = audio[context * HOP : (context + n) * HOP]
+        out[s * hop : (s + n) * hop] = audio[context * hop : (context + n) * hop]
     return out
 
 
@@ -186,12 +199,16 @@ def main():
     ap.add_argument("--window", type=int, default=128, help="frames per TPU call (W)")
     ap.add_argument("--context", type=int, default=12, help="overlap frames on each side")
     ap.add_argument("--sweep", action="store_true", help="only report SNR vs. context size, export nothing")
+    ap.add_argument("--checkpoint", help="G_*.pth from research/training/ (default: the released model)")
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
     args = ap.parse_args()
 
-    net_g = load_model()
+    net_g, audio_cfg = load_checkpoint(args.checkpoint)
+    hop, rate = audio_cfg.hop_length, audio_cfg.sample_rate
     dec = net_g.dec
-    window_model = DecoderWindow(dec, MODEL_PARAMS["upsample_rates"]).eval()
+    assert dec.num_upsamples == len(audio_cfg.upsample_rates) and int(np.prod(audio_cfg.upsample_rates)) == hop
+    window_model = DecoderWindow(dec, audio_cfg.upsample_rates).eval()
+    print(f"model: {rate} Hz, {hop} samples per frame, upsample rates {audio_cfg.upsample_rates}")
 
     def torch_dec(z, g, mask):
         with torch.no_grad():
@@ -205,7 +222,7 @@ def main():
     with torch.no_grad():
         refs = [dec(z, g=g).numpy().reshape(-1) for z, g in utts]
     frames = [z.shape[2] for z, _ in utts]
-    print(f"{len(utts)} utterances, {min(frames)}-{max(frames)} frames, {sum(frames) * HOP / 44100:.1f}s audio")
+    print(f"{len(utts)} utterances, {min(frames)}-{max(frames)} frames, {sum(frames) * hop / rate:.1f}s audio")
 
     if args.sweep:
         print("\nchunked vs. whole-utterance decode, worst utterance SNR (float32, PyTorch):")
@@ -213,18 +230,22 @@ def main():
             for context in (0, 2, 4, 6, 8, 10, 12, 16):
                 if W - 2 * context < 8:
                     continue
-                worst = min(snr_db(r, chunked_decode(torch_dec, z, g, W, context)) for (z, g), r in zip(utts, refs))
+                worst = min(
+                    snr_db(r, chunked_decode(torch_dec, z, g, W, context, hop)) for (z, g), r in zip(utts, refs)
+                )
                 cost = W / (W - 2 * context)
                 print(f"  W={W:3d} context={context:2d}  worst SNR {worst:6.1f} dB   compute x{cost:.2f}")
         return
 
     W, context = args.window, args.context
-    os.makedirs(os.path.join(args.out, "calib"), exist_ok=True)
+    name = f"decoder_{rate}hz_w{W}"
+    calib_dir = os.path.join(args.out, f"{name}_calib")
+    os.makedirs(calib_dir, exist_ok=True)
 
-    worst = min(snr_db(r, chunked_decode(torch_dec, z, g, W, context)) for (z, g), r in zip(utts, refs))
+    worst = min(snr_db(r, chunked_decode(torch_dec, z, g, W, context, hop)) for (z, g), r in zip(utts, refs))
     print(f"W={W} context={context}: chunked float32 decode, worst SNR vs. whole utterance {worst:.1f} dB")
 
-    onnx_path = os.path.join(args.out, f"decoder_w{W}.onnx")
+    onnx_path = os.path.join(args.out, f"{name}.onnx")
     z0, g0 = utts[1]
     _, win0, mask0 = next(windows(z0, W, context))
     torch.onnx.export(
@@ -246,7 +267,7 @@ def main():
     for z, g in utts[: len(SENTENCES)]:
         for _, win, mask in windows(z, W, context):
             np.savez(
-                os.path.join(args.out, "calib", f"win_{n_cal:04d}.npz"),
+                os.path.join(calib_dir, f"win_{n_cal:04d}.npz"),
                 z=win.numpy(),
                 g=g.numpy(),
                 mask=mask.numpy(),
@@ -254,22 +275,24 @@ def main():
             n_cal += 1
     print(f"wrote {n_cal} calibration windows")
 
-    np.savez(os.path.join(args.out, "test_input.npz"), z=win0.numpy(), g=g0.numpy(), mask=mask0.numpy())
-    np.savez(os.path.join(args.out, "test_ref.npz"), audio=torch_dec(win0, g0, mask0))
+    np.savez(os.path.join(args.out, f"{name}_test_input.npz"), z=win0.numpy(), g=g0.numpy(), mask=mask0.numpy())
+    np.savez(os.path.join(args.out, f"{name}_test_ref.npz"), audio=torch_dec(win0, g0, mask0))
     np.savez(
-        os.path.join(args.out, "utterances.npz"),
+        os.path.join(args.out, f"{name}_utterances.npz"),
         **{f"z{i}": z.numpy() for i, (z, _) in enumerate(utts[: len(SENTENCES)])},
         **{f"audio{i}": r for i, r in enumerate(refs[: len(SENTENCES)])},
         g=utts[0][1].numpy(),
         window=W,
         context=context,
+        hop=hop,
+        sample_rate=rate,
     )
 
     import onnxruntime as ort
 
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     ort_dec = lambda z, g, m: sess.run(None, {"z": z.numpy(), "g": g.numpy(), "mask": m.numpy()})[0]  # noqa: E731
-    worst = min(snr_db(r, chunked_decode(ort_dec, z, g, W, context)) for (z, g), r in zip(utts, refs))
+    worst = min(snr_db(r, chunked_decode(ort_dec, z, g, W, context, hop)) for (z, g), r in zip(utts, refs))
     print(f"onnxruntime, chunked: worst SNR vs. PyTorch whole utterance {worst:.1f} dB")
 
 

@@ -31,6 +31,7 @@
 #include "TinyTTS/data/default_dictionary_model_data.h"
 #include "TinyTTS/data/default_weights_data.h"
 #ifdef TINYTTS_HAVE_CVI_TPU
+#include "TinyTTS/CviTpuFlow.h"
 #include "TinyTTS/CviTpuVocoder.h"
 #endif
 
@@ -88,6 +89,9 @@ class DesktopMain {
       if (!tpu_.begin(opt.tpu_model.c_str(), opt.tpu_context)) return 1;
       tts_.setVocoder(tpu_.vocoderFn());
     }
+    for (const std::string& f : opt.tpu_flows)
+      if (!tpu_flow_.add(f.c_str())) return 1;
+    if (!opt.tpu_flows.empty()) tts_.setFlow(tpu_flow_.flowFn());
 #endif
 
     bool should_play = !opt.no_play && opt.output_file.empty() && !opt.to_stdout;
@@ -124,6 +128,12 @@ class DesktopMain {
       std::fprintf(stderr, "TinyTTS.begin() failed -- did you call all setters above?\n");
       return 1;
     }
+#ifdef TINYTTS_HAVE_CVI_TPU
+    // Only now are the weights' sample rate and hop known: TPU models from
+    // another checkpoint would silently play at the wrong speed/pitch.
+    if (!opt.tpu_model.empty() && !tpu_.checkModel(tts_.core())) return 1;
+    if (!opt.tpu_flows.empty() && !tpu_flow_.checkModel(tts_.core())) return 1;
+#endif
 
     // After tts_.begin(): the sample rate comes from the weights (a model
     // trained at e.g. 16 kHz says so in its weights.bin), and nothing is
@@ -209,6 +219,7 @@ class DesktopMain {
     bool decoder_int8 = false;
     std::string tpu_model;
     int tpu_context = 12;
+    std::vector<std::string> tpu_flows;
     bool help_requested = false;
   };
 
@@ -255,6 +266,9 @@ class DesktopMain {
                   "                        cvimodel built by research/milkv_duo/build_cvimodel.sh\n"
                   "                        (see docs/milkv-duo.md).\n"
                   "  --tpu-context N       Overlap frames per side of each TPU window, default 12.\n"
+                  "  --tpu-flow FILE       Run the flow on the TPU, from a cvimodel built by\n"
+                  "                        research/milkv_duo/build_flow_cvimodels.sh. Repeat for\n"
+                  "                        each length; longer sentences use the CPU flow.\n"
 #endif
                   "\n"
                   "  -h, --help            Show this help text.\n",
@@ -334,6 +348,10 @@ class DesktopMain {
         const char* v = next(a.c_str());
         if (!v) return false;
         opt.tpu_context = std::atoi(v);
+      } else if (a == "--tpu-flow") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.tpu_flows.push_back(v);
 #endif
       } else if (!a.empty() && a[0] == '-' && a != "-") {
         std::fprintf(stderr, "unknown option: %s\n", a.c_str());
@@ -523,7 +541,8 @@ class DesktopMain {
   audio_tools::MiniAudioStream out_;
   audio_tools::BufferedStream buffered_out_{out_, kWriteChunkBytes};
 #ifdef TINYTTS_HAVE_CVI_TPU
-  CviTpuVocoder tpu_;  // before tts_: must outlive tts_'s use of it
+  CviTpuVocoder tpu_;  // before tts_: these must outlive tts_'s use of them
+  CviTpuFlow tpu_flow_;
 #endif
   // --weights data; declared before tts_ so it outlives it (setWeights()
   // borrows the pointer).

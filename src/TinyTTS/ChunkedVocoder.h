@@ -52,6 +52,7 @@ class ChunkedVocoder {
 
   int window() const { return window_; }
   int context() const { return context_; }
+  int hop() const { return hop_; }
 
   /// z: [T, inter_channels] (the flow's output), g: [1, gin_channels].
   /// Calls `on_audio` once per window with T * hop samples in total.
