@@ -5,7 +5,9 @@ filelist. Single process, runs on CPU or CUDA (auto-detected).
 Checkpoints (`<run_dir>/G_<step>.pth`) use upstream's `{"model": state_dict}`
 layout with exactly G.pth's keys, so they go straight into
 `../export_weights_and_vectors.py --checkpoint` and from there into the C++
-library.
+library. The output sample rate is whatever prepare_dataset.py --sample-rate
+resampled the training wavs to (see audio_config.py); it's stored in every
+checkpoint under "audio".
 
 Typical CPU fine-tune of the released English model on a dataset subset:
   python train.py --config configs/en_ljspeech.json \
@@ -36,7 +38,7 @@ from losses import discriminator_loss, feature_loss, generator_loss, kl_loss  # 
 from mel import mel_spectrogram_torch, spec_to_mel_torch  # noqa: E402
 from model_train import build_generator, load_pretrained  # noqa: E402
 from tiny_tts.nn import commons  # noqa: E402
-from tiny_tts.utils.config import HOP_LENGTH, SAMPLING_RATE, SEGMENT_FRAMES  # noqa: E402
+from tiny_tts.utils.config import SEGMENT_FRAMES  # noqa: E402
 
 DEFAULTS = dict(
     train=None,
@@ -83,7 +85,7 @@ def parse_args():
     p.add_argument("--workers", type=int, help="DataLoader worker processes")
     p.add_argument("--seed", type=int)
     p.add_argument("--batch-size", type=int)
-    p.add_argument("--segment-frames", type=int, help=f"decoder training slice in spectrogram frames (x{HOP_LENGTH} samples)")
+    p.add_argument("--segment-frames", type=int, help="decoder training slice in spectrogram frames (x hop length samples)")
     p.add_argument("--max-steps", type=int)
     p.add_argument("--learning-rate", type=float)
     p.add_argument("--lr-decay", type=float, help="ExponentialLR gamma, applied per epoch")
@@ -119,14 +121,12 @@ def checkpoint_steps(run_dir, prefix):
     return sorted(steps)
 
 
-def save_checkpoint(args, step, epoch, net_g, net_d, optim_g, optim_d, sched_g, sched_d):
+def save_checkpoint(args, audio, step, epoch, net_g, net_d, optim_g, optim_d, sched_g, sched_d):
     g_path = os.path.join(args.run_dir, f"G_{step}.pth")
+    common = {"step": step, "epoch": epoch, "audio": audio.to_dict()}
+    torch.save({"model": net_g.state_dict(), "optimizer": optim_g.state_dict(), "scheduler": sched_g.state_dict(), **common}, g_path)
     torch.save(
-        {"model": net_g.state_dict(), "optimizer": optim_g.state_dict(), "scheduler": sched_g.state_dict(), "step": step, "epoch": epoch},
-        g_path,
-    )
-    torch.save(
-        {"model": net_d.state_dict(), "optimizer": optim_d.state_dict(), "scheduler": sched_d.state_dict(), "step": step, "epoch": epoch},
+        {"model": net_d.state_dict(), "optimizer": optim_d.state_dict(), "scheduler": sched_d.state_dict(), **common},
         os.path.join(args.run_dir, f"D_{step}.pth"),
     )
     if args.keep_checkpoints:
@@ -139,7 +139,7 @@ def save_checkpoint(args, step, epoch, net_g, net_d, optim_g, optim_d, sched_g, 
 
 
 @torch.no_grad()
-def write_sample(args, net_g, val_items, step, device):
+def write_sample(args, audio_cfg, net_g, val_items, step, device):
     if not val_items:
         return
     net_g.eval()
@@ -162,7 +162,7 @@ def write_sample(args, net_g, val_items, step, device):
     )
     os.makedirs(os.path.join(args.run_dir, "samples"), exist_ok=True)
     path = os.path.join(args.run_dir, "samples", f"step_{step}.wav")
-    sf.write(path, audio[0, 0].cpu().numpy(), SAMPLING_RATE)
+    sf.write(path, audio[0, 0].cpu().numpy(), audio_cfg.sample_rate)
     print(f"wrote sample {path}", flush=True)
     net_g.train()
 
@@ -182,6 +182,9 @@ def main():
     print(f"device {device}, {torch.get_num_threads()} CPU threads", flush=True)
 
     train_set = TextAudioDataset(args.train)
+    audio = train_set.audio
+    print(f"{audio.sample_rate} Hz: hop {audio.hop_length}, n_fft {audio.n_fft}, {audio.n_mels} mels, "
+          f"vocoder upsample rates {audio.upsample_rates}", flush=True)
     val_items = TextAudioDataset(args.val).items if args.val else []
     loader = torch.utils.data.DataLoader(
         train_set,
@@ -192,7 +195,7 @@ def main():
     )
     print(f"{len(train_set)} training utterances, {len(loader)} batches/epoch", flush=True)
 
-    net_g = build_generator(args.segment_frames).to(device)
+    net_g = build_generator(audio, args.segment_frames).to(device)
     net_d = MultiPeriodDiscriminator(width=args.disc_width).to(device)
 
     step, epoch = 0, 0
@@ -201,7 +204,7 @@ def main():
         missing, unexpected = load_pretrained(net_g, args.init_checkpoint)
         print(f"initialized from {args.init_checkpoint or 'HF backtracking/tiny-tts G.pth'}", flush=True)
         if missing:
-            print(f"  {len(missing)} generator tensors not in checkpoint (trained from scratch): "
+            print(f"  {len(missing)} generator tensors not in checkpoint or differently shaped (start fresh): "
                   f"{sorted({k.split('.')[0] for k in missing})}", flush=True)
         if unexpected:
             print(f"  {len(unexpected)} checkpoint tensors ignored", flush=True)
@@ -223,13 +226,17 @@ def main():
         last = resume_steps[-1]
         for prefix, net, optim, sched in (("G", net_g, optim_g, sched_g), ("D", net_d, optim_d, sched_d)):
             ckpt = torch.load(os.path.join(args.run_dir, f"{prefix}_{last}.pth"), map_location=device)
+            ckpt_rate = ckpt.get("audio", {}).get("sample_rate", 44100)
+            if ckpt_rate != audio.sample_rate:
+                raise SystemExit(f"{args.run_dir} was trained at {ckpt_rate} Hz but the training data is {audio.sample_rate} Hz")
             net.load_state_dict(ckpt["model"])
             optim.load_state_dict(ckpt["optimizer"])
             sched.load_state_dict(ckpt["scheduler"])
         step, epoch = last, ckpt["epoch"]
         print(f"resumed from step {step} (epoch {epoch})", flush=True)
 
-    seg_samples = args.segment_frames * HOP_LENGTH
+    hop = audio.hop_length
+    seg_samples = args.segment_frames * hop
     net_g.train()
     net_d.train()
     t_last = time.time()
@@ -244,10 +251,10 @@ def main():
                 batch["sid"], batch["tones"], batch["langs"],
             )
             y_hat = out["wav"]
-            mel = spec_to_mel_torch(batch["spec"])
+            mel = spec_to_mel_torch(audio, batch["spec"])
             y_mel = commons.extract_segments(mel, out["ids_slice"], args.segment_frames)
-            y_hat_mel = mel_spectrogram_torch(y_hat.squeeze(1))
-            y = commons.extract_segments(batch["wav"], out["ids_slice"] * HOP_LENGTH, seg_samples)
+            y_hat_mel = mel_spectrogram_torch(audio, y_hat.squeeze(1))
+            y = commons.extract_segments(batch["wav"], out["ids_slice"] * hop, seg_samples)
 
             # Discriminator step.
             loss_disc = torch.zeros((), device=device)
@@ -289,9 +296,9 @@ def main():
                     flush=True,
                 )
             if args.eval_every and step % args.eval_every == 0:
-                write_sample(args, net_g, val_items, step, device)
+                write_sample(args, audio, net_g, val_items, step, device)
             if step % args.save_every == 0 or step >= args.max_steps:
-                save_checkpoint(args, step, epoch, net_g, net_d, optim_g, optim_d, sched_g, sched_d)
+                save_checkpoint(args, audio, step, epoch, net_g, net_d, optim_g, optim_d, sched_g, sched_d)
             if step >= args.max_steps:
                 break
         else:

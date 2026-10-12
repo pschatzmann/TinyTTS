@@ -12,13 +12,20 @@ namespace tinytts {
 
 /**
  * @brief Hand-written C++ port of tiny_tts.models.synthesizer.WaveformDecoder
- * (the HiFi-GAN-style vocoder, `net_g.dec`): Conv1d pre + 5 upsample stages
+ * (the HiFi-GAN-style vocoder, `net_g.dec`): Conv1d pre + N upsample stages
  * (LeakyReLU + ConvTranspose1d + 3 summed dilated ConvResBlocks) + LeakyReLU +
  * Conv1d post + tanh, with speaker conditioning added once before the first
  * upsample stage. Plain Conv1d/ConvTranspose1d/LeakyReLU -- no attention, no
  * TFLite Micro fixed-input-shape constraint, so an utterance of any length
  * runs in one pass (see docs/architecture.md for why this replaced the
  * TFLite Micro decoder).
+ *
+ * The released 44.1 kHz model has 5 stages with strides {8, 8, 2, 2, 2} (x512
+ * samples per frame). Models trained at a lower sample rate
+ * (research/training/audio_config.py) drop stages from the end; their
+ * weights.bin carries `meta.upsample_rates`, and the stage count/kernel
+ * sizes follow from that and the weight shapes. Weights without it are the
+ * released layout.
  * @author Phil Schatzmann
  * @copyright Apache-2.0
  */
@@ -31,17 +38,22 @@ class Vocoder {
     cond_w_ = ws.linearWeight(prefix + ".cond.weight");
     cond_b_ = ws.vec(prefix + ".cond.bias");
 
-    static const int kRates[kNumUpsamples] = {8, 8, 2, 2, 2};
-    static const int kKernelSizes[kNumUpsamples] = {16, 16, 8, 2, 2};
-    for (int i = 0; i < kNumUpsamples; i++) {
+    std::vector<float> rates = ws.vec("meta.upsample_rates");
+    if (rates.empty()) rates = {8, 8, 2, 2, 2};  // released 44.1 kHz model
+    num_upsamples_ = (int)rates.size() < kMaxUpsamples ? (int)rates.size() : kMaxUpsamples;
+    hop_length_ = 1;
+    for (int i = 0; i < num_upsamples_; i++) {
       std::string p = prefix + ".ups." + std::to_string(i);
       ups_[i].weight = ws.convWeight(p + ".weight");
       ups_[i].bias = ws.vec(p + ".bias");
-      ups_[i].stride = kRates[i];
-      ups_[i].padding = (kKernelSizes[i] - kRates[i]) / 2;
+      ups_[i].stride = (int)rates[i];
+      // ConvTranspose1d weight is [Cin, Cout, K]; upstream pads (K - stride) / 2.
+      int kernel = ups_[i].weight ? ups_[i].weight->shape[2] : 0;
+      ups_[i].padding = (kernel - ups_[i].stride) / 2;
+      hop_length_ *= ups_[i].stride;
     }
 
-    for (int idx = 0; idx < kNumUpsamples * kNumKernels; idx++) {
+    for (int idx = 0; idx < num_upsamples_ * kNumKernels; idx++) {
       std::string p = prefix + ".resblocks." + std::to_string(idx);
       for (int c = 0; c < 3; c++) {
         resblocks_[idx].convs1[c] = ws.convWeight(p + ".convs1." + std::to_string(c) + ".weight");
@@ -56,7 +68,8 @@ class Vocoder {
 
   /// z: [T, inter_channels] (the flow's output). g: [1, gin_channels] speaker
   /// embedding. Returns interleaved mono PCM samples (range [-1,1]), length
-  /// T * (product of the upsample rates, 512 for this project's model) --
+  /// T * hopLength() (product of the upsample rates, 512 for the released
+  /// 44.1 kHz model) --
   /// PSRAM-backed (PsramVector, see PsramStlAllocator.h): for anything but
   /// very short text this is hundreds of KB to a few MB, too big for
   /// internal DRAM.
@@ -66,7 +79,7 @@ class Vocoder {
     for (int t = 0; t < x.rows(); t++)
       for (int c = 0; c < x.cols(); c++) x.at(t, c) += g_proj.at(0, c);
 
-    for (int i = 0; i < kNumUpsamples; i++) {
+    for (int i = 0; i < num_upsamples_; i++) {
       ops::leakyReluInplace(x, 0.1f);
       x = ops::convTranspose1d(x, *ups_[i].weight, ups_[i].bias, ups_[i].stride, ups_[i].padding);
 
@@ -90,8 +103,12 @@ class Vocoder {
     return audio;
   }
 
+  /// Output samples per spectrogram frame (product of the upsample rates).
+  int hopLength() const { return hop_length_; }
+  int numUpsamples() const { return num_upsamples_; }
+
  private:
-  static constexpr int kNumUpsamples = 5;
+  static constexpr int kMaxUpsamples = 6;
   static constexpr int kNumKernels = 3;  // resblock_kernel_sizes: 3, 7, 11
   static constexpr int kDilations[3] = {1, 3, 5};
 
@@ -129,8 +146,10 @@ class Vocoder {
   std::vector<float> conv_pre_b_;
   Mat cond_w_;
   std::vector<float> cond_b_;
-  UpsampleLayer ups_[kNumUpsamples];
-  ResBlockWeights resblocks_[kNumUpsamples * kNumKernels];
+  int num_upsamples_ = 0;
+  int hop_length_ = 1;
+  UpsampleLayer ups_[kMaxUpsamples];
+  ResBlockWeights resblocks_[kMaxUpsamples * kNumKernels];
   const WeightStore::Entry* conv_post_w_ = nullptr;
 };
 

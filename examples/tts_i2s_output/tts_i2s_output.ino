@@ -60,13 +60,6 @@ void setup() {
 
   Serial.printf("PSRAM: %u bytes free of %u\n", ESP.getFreePsram(), ESP.getPsramSize());
 
-  // Setup I2s
-  auto cfg = i2s_out.defaultConfig(TX_MODE);
-  cfg.sample_rate = tts.getAudioSampleRate();
-  cfg.channels = tts.getAudioChannels();
-  cfg.bits_per_sample = tts.getAudioBitsPerSample();
-  i2s_out.begin(cfg);
-
   // setup TTS
   tts.setWeights(default_weights, default_weights_len);
   tts.setDictionary(default_cmudict_slim, default_cmudict_slim_len);
@@ -75,6 +68,15 @@ void setup() {
     Serial.println("TinyTTS.begin() failed -- did you call all setters above?");
     while (true) {}
   }
+
+  // Setup I2S -- after tts.begin(): the sample rate is read from the model
+  // weights (44100 for the default model, e.g. 16000 for one trained at a
+  // lower rate, see docs/training.md).
+  auto cfg = i2s_out.defaultConfig(TX_MODE);
+  cfg.sample_rate = tts.getAudioSampleRate();
+  cfg.channels = tts.getAudioChannels();
+  cfg.bits_per_sample = tts.getAudioBitsPerSample();
+  i2s_out.begin(cfg);
 
   Serial.printf("PSRAM after begin(): %u bytes free of %u\n", ESP.getFreePsram(), ESP.getPsramSize());
   Serial.println("Ready.");

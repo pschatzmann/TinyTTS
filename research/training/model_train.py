@@ -20,7 +20,9 @@ import tiny_tts.alignment as alignment
 from tiny_tts.models import VoiceSynthesizer
 from tiny_tts.nn import commons
 from tiny_tts.text.symbols import symbols
-from tiny_tts.utils import MODEL_PARAMS, N_SPEAKERS, SEGMENT_FRAMES, SPEC_CHANNELS
+from tiny_tts.utils import N_SPEAKERS, SEGMENT_FRAMES
+
+from audio_config import DEFAULT_SAMPLE_RATE, audio_config_for
 
 # BERT conditioning is disabled in this model (inference always feeds zeros,
 # see tiny_tts/infer.py and PhonemeEncoder.h), so training does the same.
@@ -35,7 +37,7 @@ class TrainableSynthesizer(VoiceSynthesizer):
 
     def forward(self, x, x_lengths, y, y_lengths, sid, tone, language):
         """
-        x/tone/language: [B, T_text] ids; y: [B, SPEC_CHANNELS, T_frames]
+        x/tone/language: [B, T_text] ids; y: [B, n_fft/2+1, T_frames]
         linear spectrogram. Returns the generated waveform slice plus
         everything the losses need.
         """
@@ -95,10 +97,15 @@ class TrainableSynthesizer(VoiceSynthesizer):
         )
 
 
-def build_generator(segment_frames=SEGMENT_FRAMES):
-    """Same constructor call as tiny_tts/infer.py and export_weights_and_vectors.py."""
+def build_generator(audio=None, segment_frames=SEGMENT_FRAMES):
+    """
+    Same constructor call as tiny_tts/infer.py and export_weights_and_vectors.py;
+    `audio` (an AudioConfig, default 44.1 kHz = the released model) sets the
+    spectrogram size and the vocoder's upsample stack.
+    """
+    audio = audio or audio_config_for(DEFAULT_SAMPLE_RATE)
     return TrainableSynthesizer(
-        len(symbols), SPEC_CHANNELS, segment_frames, n_speakers=N_SPEAKERS, **MODEL_PARAMS
+        len(symbols), audio.spec_channels, segment_frames, n_speakers=N_SPEAKERS, **audio.model_params()
     )
 
 
@@ -106,7 +113,10 @@ def load_pretrained(net_g, path=None):
     """
     Loads G.pth (default: the HuggingFace backtracking/tiny-tts checkpoint the
     shipped weights come from -- not the stale one committed in the upstream
-    repo, see docs/research.md). Returns (missing, unexpected) key lists.
+    repo, see docs/research.md). Tensors whose shape differs (e.g. enc_q's
+    input layer and the vocoder's last conv when training at another sample
+    rate) are skipped and stay freshly initialized. Returns (missing,
+    unexpected) key lists.
     """
     if path is None:
         from huggingface_hub import hf_hub_download

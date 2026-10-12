@@ -29,6 +29,14 @@ WeightStore.h parses both:
     activations scheme because weights-only quantization measured *better*
     audio quality and TFLite Micro's "hybrid model" rejection (the reason
     that scheme wasn't used originally) doesn't apply to hand-written code.
+
+weights.bin also carries two small float32 metadata tensors describing the
+audio side of the model, so the C++ runtime can run models trained at other
+sample rates (training/audio_config.py) without being rebuilt:
+  meta.sample_rate     [1]  output sample rate in Hz
+  meta.upsample_rates  [n]  the vocoder's ConvTranspose1d strides, one per stage
+Absent (weights.bin from before this was added) means the released 44.1 kHz
+model's 44100 / [8, 8, 2, 2, 2].
 """
 import argparse
 import os
@@ -42,26 +50,34 @@ import torch
 
 from tiny_tts.models import VoiceSynthesizer
 from tiny_tts.text.symbols import symbols
-from tiny_tts.utils import SPEC_CHANNELS, SEGMENT_FRAMES, N_SPEAKERS, MODEL_PARAMS
+from tiny_tts.utils import SEGMENT_FRAMES, N_SPEAKERS, MODEL_PARAMS
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def load_model(ckpt_path=None):
     """ckpt_path: a G_*.pth (e.g. from training/train.py); default is the
-    released HuggingFace checkpoint the shipped weights come from."""
-    net_g = VoiceSynthesizer(
-        len(symbols), SPEC_CHANNELS, SEGMENT_FRAMES, n_speakers=N_SPEAKERS, **MODEL_PARAMS
-    )
+    released HuggingFace checkpoint the shipped weights come from.
+
+    Returns (net_g, audio): `audio` is the checkpoint's AudioConfig
+    (training/audio_config.py) -- sample rate and vocoder upsample stack;
+    checkpoints without one (the released G.pth) are 44.1 kHz."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "training"))
+    from audio_config import audio_config_from_checkpoint
+
     if ckpt_path is None:
         from huggingface_hub import hf_hub_download
 
         ckpt_path = hf_hub_download("backtracking/tiny-tts", "G.pth")
     ckpt = torch.load(ckpt_path, map_location="cpu")
+    audio = audio_config_from_checkpoint(ckpt)
+    net_g = VoiceSynthesizer(
+        len(symbols), audio.spec_channels, SEGMENT_FRAMES, n_speakers=N_SPEAKERS, **audio.model_params()
+    )
     net_g.load_state_dict(ckpt["model"], strict=False)
     net_g.eval()
     net_g.dec.remove_weight_norm()
-    return net_g
+    return net_g, audio
 
 
 def write_tensor(f, name, arr, dtype="float32"):
@@ -109,7 +125,8 @@ def write_quantized_tensor(f, name, arr):
     f.write(np.ascontiguousarray(q).tobytes())
 
 
-def export_state_dict_subset(net_g, prefixes, out_path, exclude=(), dtype="float32", quantize_rows_of=()):
+def export_state_dict_subset(net_g, prefixes, out_path, exclude=(), dtype="float32", quantize_rows_of=(), extra=()):
+    """`extra`: (name, float32 array) pairs appended as-is (dtype 0), e.g. the meta.* tensors."""
     sd = net_g.state_dict()
     with open(out_path, "wb") as f:
         n = 0
@@ -122,6 +139,9 @@ def export_state_dict_subset(net_g, prefixes, out_path, exclude=(), dtype="float
                 else:
                     write_tensor(f, k, v.detach().numpy(), dtype=dtype)
                 n += 1
+        for name, arr in extra:
+            write_tensor(f, name, np.asarray(arr, dtype=np.float32))
+            n += 1
         write_terminator(f)
     print(f"wrote {n} tensors to {out_path}")
 
@@ -144,7 +164,8 @@ def main():
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
 
-    net_g = load_model(args.checkpoint)
+    net_g, audio = load_model(args.checkpoint)
+    print(f"model: {audio.sample_rate} Hz, vocoder upsample rates {audio.upsample_rates}")
 
     # Every Conv1d/ConvTranspose1d weight in `decoder` -- matches
     # validate_decoder_int8.py's scope exactly, so what got accuracy-checked
@@ -158,6 +179,7 @@ def main():
     export_state_dict_subset(
         net_g, ["enc_p.", "flow.", "emb_g.", "dp.", "dec."], os.path.join(out_dir, "weights.bin"),
         exclude=UNUSED_BERT_PROJ_WEIGHTS, dtype="float16", quantize_rows_of=decoder_quantized_weights,
+        extra=[("meta.sample_rate", [audio.sample_rate]), ("meta.upsample_rates", audio.upsample_rates)],
     )
     print(f"quantized {len(decoder_quantized_weights)} decoder Conv1d/ConvTranspose1d weight tensors to INT8")
 

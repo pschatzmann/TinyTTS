@@ -11,10 +11,8 @@ import random
 import soundfile as sf
 import torch
 
-import upstream  # noqa: F401
-
+from audio_config import audio_config_for
 from mel import spectrogram_torch
-from tiny_tts.utils.config import HOP_LENGTH
 
 
 def read_filelist(path):
@@ -39,11 +37,21 @@ def read_filelist(path):
 
 
 class TextAudioDataset(torch.utils.data.Dataset):
+    """
+    The sample rate (and with it hop/STFT/vocoder settings, see
+    audio_config.py) comes from the prepared wavs themselves, i.e. from
+    prepare_dataset.py --sample-rate; mixed rates in one filelist are an error.
+    """
+
     def __init__(self, filelist):
         self.items = read_filelist(filelist)
-        # Frame count per item, for length bucketing -- from the wav header
-        # only, no decoding.
-        self.frames = [sf.info(it["wav"]).frames // HOP_LENGTH for it in self.items]
+        infos = [sf.info(it["wav"]) for it in self.items]  # headers only, no decoding
+        rates = sorted({info.samplerate for info in infos})
+        if len(rates) != 1:
+            raise ValueError(f"{filelist}: wavs have mixed sample rates {rates} -- re-run prepare_dataset.py")
+        self.audio = audio_config_for(rates[0])
+        # Frame count per item, for length bucketing.
+        self.frames = [info.frames // self.audio.hop_length for info in infos]
 
     def __len__(self):
         return len(self.items)
@@ -52,11 +60,11 @@ class TextAudioDataset(torch.utils.data.Dataset):
         it = self.items[i]
         audio, _ = sf.read(it["wav"], dtype="float32")
         audio = torch.from_numpy(audio)
-        # Trim to a whole number of hops so frames * HOP_LENGTH == samples
-        # exactly (the decoder's total upsampling factor is HOP_LENGTH).
-        n = (audio.shape[0] // HOP_LENGTH) * HOP_LENGTH
-        audio = audio[:n]
-        spec = spectrogram_torch(audio.unsqueeze(0)).squeeze(0)  # [1025, frames]
+        # Trim to a whole number of hops so frames * hop == samples exactly
+        # (the decoder's total upsampling factor is the hop length).
+        hop = self.audio.hop_length
+        audio = audio[: (audio.shape[0] // hop) * hop]
+        spec = spectrogram_torch(self.audio, audio.unsqueeze(0)).squeeze(0)  # [n_fft/2+1, frames]
         return dict(
             phones=torch.LongTensor(it["phones"]),
             tones=torch.LongTensor(it["tones"]),

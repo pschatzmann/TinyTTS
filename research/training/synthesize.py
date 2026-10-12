@@ -15,9 +15,9 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import upstream  # noqa: F401,E402
 
+from audio_config import audio_config_from_checkpoint  # noqa: E402
 from frontends import get_frontend  # noqa: E402
 from model_train import build_generator, load_pretrained  # noqa: E402
-from tiny_tts.utils.config import SAMPLING_RATE  # noqa: E402
 
 
 def main():
@@ -33,7 +33,9 @@ def main():
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
-    net_g = build_generator()
+    # Rebuild the model for the sample rate the checkpoint was trained at.
+    audio_cfg = audio_config_from_checkpoint(torch.load(args.checkpoint, map_location="cpu") if args.checkpoint else None)
+    net_g = build_generator(audio_cfg)
     missing, _ = load_pretrained(net_g, args.checkpoint)
     if missing:
         print(f"warning: {len(missing)} tensors missing from checkpoint")
@@ -55,8 +57,8 @@ def main():
             length_scale=args.length_scale,
             sdp_ratio=0.0,
         )
-    sf.write(args.output, audio[0, 0].numpy(), SAMPLING_RATE)
-    print(f"wrote {args.output} ({audio.shape[-1] / SAMPLING_RATE:.2f}s)")
+    sf.write(args.output, audio[0, 0].numpy(), audio_cfg.sample_rate)
+    print(f"wrote {args.output} ({audio.shape[-1] / audio_cfg.sample_rate:.2f}s at {audio_cfg.sample_rate} Hz)")
 
 
 if __name__ == "__main__":

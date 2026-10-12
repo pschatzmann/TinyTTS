@@ -22,6 +22,7 @@ trained model can't drift from what the C++ port implements.
 |---|---|
 | `prepare_dataset.py` | LJSpeech-layout dataset (`metadata.csv` + `wavs/`) → audio resampled to 44.1 kHz + `train.txt`/`val.txt` filelists. Phonemization happens here, once. |
 | `frontends/` | Text → phone/tone/language ids, one module per language. `en.py` is upstream's own English pipeline (CMU dictionary + g2p_en fallback). |
+| `audio_config.py` | Derives hop, STFT, mel and vocoder layout from the output sample rate (see "Sample rate"). |
 | `model_train.py` | `TrainableSynthesizer`: upstream `VoiceSynthesizer` plus MeloTTS's training `forward()` (MAS alignment, duration losses, random decoder slices). Adds no parameters. |
 | `discriminators.py`, `losses.py` | HiFi-GAN multi-period/scale discriminator and the VITS losses (mel L1, KL, duration, adversarial, feature matching). |
 | `train.py` | The training loop: CPU or CUDA, resumable, writes `G_<step>.pth` checkpoints and sample WAVs. |
@@ -120,6 +121,48 @@ To listen to any checkpoint:
 ```bash
 python synthesize.py --checkpoint runs/ljspeech/G_5000.pth --text "Hello world." -o hello.wav
 ```
+
+### Sample rate
+
+The released model outputs 44.1 kHz audio. For a microcontroller speaker, 16 kHz (or even
+8 kHz) is usually enough, and it is cheaper to synthesize. The output rate is chosen once, when
+the dataset is prepared:
+
+```bash
+python prepare_dataset.py --input data/LJSpeech-1.1 --out data/ljspeech16k --sample-rate 16000
+python train.py --config configs/en_ljspeech.json --train data/ljspeech16k/train.txt \
+    --val data/ljspeech16k/val.txt --run-dir runs/ljspeech16k
+```
+
+Everything after that follows automatically:
+- `train.py` reads the rate from the prepared WAVs.
+- Checkpoints record it.
+- `synthesize.py` and `export_weights_and_vectors.py` rebuild the matching model.
+- The exported `weights.bin` carries the rate, so the C++ library and `tinytts --weights` play
+  it at the right speed. `TinyTTS::getAudioSampleRate()` reports it **after `begin()`**, so
+  configure your I2S/audio output after `begin()`, as `examples/tts_i2s_output` does.
+
+The rate isn't just a resampling step. The vocoder turns every spectrogram frame into exactly
+one hop of samples, so the hop length, the STFT and mel settings, and the vocoder's stack of
+upsampling layers all change with it (`research/training/audio_config.py`):
+
+| Sample rate | Hop (frame) | Vocoder upsampling | Vocoder time per second of audio (desktop) |
+|---|---|---|---:|
+| 44100 (released model) | 512 (11.6 ms) | 8·8·2·2·2 | ~400 ms |
+| 22050 / 24000 | 256 (11.6 / 10.7 ms) | 8·8·2·2 | – |
+| 16000 | 256 (16 ms) | 8·8·2·2 | ~205 ms |
+| 8000 | 128 (16 ms) | 8·8·2 | ~178 ms |
+
+The time column is relative cost on the desktop CLI. A microcontroller is much slower in
+absolute terms, but the ratios carry over. 16 kHz roughly halves vocoder time. 8 kHz saves
+little more, because it keeps the same 62.5 frames per second, so the expensive early vocoder
+stages stay identical. 8 kHz only drops the cheapest, last stage.
+
+Fine-tuning from the released 44.1 kHz checkpoint still works at a lower rate. The text
+encoder, flow and duration predictor are unaffected, and so are all vocoder stages except the
+dropped ones. Only `enc_q`'s input layer and the vocoder's final conv change shape and start
+fresh; `train.py` lists them at startup. Expect the mel loss to start higher than in a
+44.1 kHz fine-tune, and to need more steps before the output sounds clean.
 
 ### Fine-tune vs. from scratch
 

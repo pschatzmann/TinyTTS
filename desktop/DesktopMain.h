@@ -82,20 +82,6 @@ class DesktopMain {
                                                : tinytts::ops::DecoderPrecision::kFloat32);
 
     bool should_play = !opt.no_play && opt.output_file.empty() && !opt.to_stdout;
-    if (should_play) {
-      auto cfg = out_.defaultConfig(audio_tools::TX_MODE);
-      cfg.sample_rate = tts_.getAudioSampleRate();
-      // TinyTTS is always mono; MiniAudioConfig::defaultConfig() defaults
-      // to channels=2 -- must override explicitly or every other sample
-      // is silence (channel-swapped/interleaved garbage), an easy miss
-      // since it isn't the default.
-      cfg.channels = tts_.getAudioChannels();
-      cfg.bits_per_sample = tts_.getAudioBitsPerSample();
-      if (!out_.begin(cfg)) {
-        std::fprintf(stderr, "MiniAudioStream.begin() failed\n");
-        return 1;
-      }
-    }
 
     if (opt.weights_file.empty()) {
       tts_.setWeights(default_weights, default_weights_len);
@@ -128,6 +114,24 @@ class DesktopMain {
         })) {
       std::fprintf(stderr, "TinyTTS.begin() failed -- did you call all setters above?\n");
       return 1;
+    }
+
+    // After tts_.begin(): the sample rate comes from the weights (a model
+    // trained at e.g. 16 kHz says so in its weights.bin), and nothing is
+    // played before the first speak() below anyway.
+    if (should_play) {
+      auto cfg = out_.defaultConfig(audio_tools::TX_MODE);
+      cfg.sample_rate = tts_.getAudioSampleRate();
+      // TinyTTS is always mono; MiniAudioConfig::defaultConfig() defaults
+      // to channels=2 -- must override explicitly or every other sample
+      // is silence (channel-swapped/interleaved garbage), an easy miss
+      // since it isn't the default.
+      cfg.channels = tts_.getAudioChannels();
+      cfg.bits_per_sample = tts_.getAudioBitsPerSample();
+      if (!out_.begin(cfg)) {
+        std::fprintf(stderr, "MiniAudioStream.begin() failed\n");
+        return 1;
+      }
     }
 
     // Chunked, not one speak() call for the whole input: TinyTTS::speak()

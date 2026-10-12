@@ -138,7 +138,14 @@ class TinyTTS {
   // I2SStream) directly from these instead of duplicating the values. ----
   int getAudioChannels() const { return 1; }
   int getAudioBitsPerSample() const { return 16; }
-  int getAudioSampleRate() const { return sample_rate_; }
+  /// The model's native sample rate -- 44100 for the released model, or
+  /// whatever a custom-trained weights.bin says (see docs/training.md). Read
+  /// from the weights, so only definitive after begin(); before that it's
+  /// 44100. setAudioSampleRate() overrides the reported value (no resampling).
+  int getAudioSampleRate() const {
+    if (sample_rate_ > 0) return sample_rate_;
+    return started_ ? core_.sampleRate() : TinyTTSCore::kDefaultSampleRate;
+  }
   void setAudioSampleRate(int sample_rate) { sample_rate_ = sample_rate; }
 
   /**
@@ -271,7 +278,7 @@ class TinyTTS {
   float noise_scale_ = 0.667f;
   float length_scale_ = 1.0f;
   float volume_ = 0.4f;
-  int sample_rate_ = 44100;  // tiny_tts.utils.config.SAMPLING_RATE
+  int sample_rate_ = 0;  // 0 = the model's own (TinyTTSCore::sampleRate())
 
 #ifdef ARDUINO
   Print* output_ = nullptr;
