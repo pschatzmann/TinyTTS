@@ -180,3 +180,13 @@ Notes:
   to spare.
 - **Memory**: about 34KB of code and data in SRAM, about 90KB of code in SDRAM (of 1MB), the
   model data in flash, and a peak heap of about 3.5MB for this sentence.
+
+## Conclusion
+
+Running TinyTTS on the soft CPU shows that the model works on this board, but even with
+the INT8 engine it's far from usable: the CPU spends most of its time on the vocoder's
+small layers and software float. To make the FPGA useful you need to move the model itself
+into hardware. [TangNanoVocoder](https://github.com/pschatzmann/TangNanoVocoder) does that:
+it runs the whole neural pipeline on the Tang Nano 20K's FPGA and plays the audio over I2S
+or PWM, so a microcontroller only has to do G2P (text to phoneme IDs). It runs at about
+real time (3.9s of speech in 3.59s), against roughly 1,400 times slower than real time here.
