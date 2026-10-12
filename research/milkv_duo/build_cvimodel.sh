@@ -7,23 +7,23 @@
 # tpu_mlir[onnx]` in a Python 3.10 environment, or the sophgo/tpuc_dev Docker
 # image. Run from research/ after export_decoder_tpu.py:
 #
-#   milkv_duo/build_cvimodel.sh [NAME]     # default decoder_44100hz_w128
+#   milkv_duo/build_cvimodel.sh [NAME [all]]    # default decoder_44100hz_w128, BF16 only
 #
 # NAME is the ONNX model's name as export_decoder_tpu.py wrote it,
 # decoder_<sample rate>hz_w<W> -- e.g. decoder_16000hz_w128 for a model
 # exported with --checkpoint from a 16 kHz training run.
 #
-# Produces out/<NAME>_{bf16,mix,int8}.cvimodel (numbers for the released
-# 44.1 kHz model):
-#   bf16  all-BF16: 27dB median SNR vs. float32 -- the one to use
-#   mix   INT8 with the layers most sensitive to quantization in BF16
-#         (the search takes ~2 hours)
-#   int8  all-INT8: unusable (-2.5dB median SNR, see docs/milkv-duo.md); fails
-#         model_deploy's accuracy check, built anyway for comparison
+# Produces out/<NAME>_bf16.cvimodel: 27dB median SNR vs. float32 for the
+# released 44.1 kHz model. With "all" also, for comparison (both unusable,
+# see docs/milkv-duo.md, and both fail model_deploy's accuracy check):
+#   int8  all-INT8: -2.5dB median SNR
+#   mix   INT8 with the 47 layers most sensitive to quantization in BF16:
+#         -2dB; its layer search alone takes about 4 hours
 # validate_cvimodel.py measures them over whole utterances.
 set -euo pipefail
 
 NAME=${1:-decoder_44100hz_w128}
+ALL=${2:-}
 W=${NAME##*_w}
 OUT=$(cd "$(dirname "$0")" && pwd)/out
 PROCESSOR=cv181x
@@ -65,6 +65,11 @@ deploy() {  # deploy <suffix> <model_deploy args...>
 
 deploy bf16 --quantize BF16 --tolerance 0.99,0.9
 
+if [[ "$ALL" != all ]]; then
+  ls -la "$OUT/${NAME}_bf16.cvimodel"
+  exit 0
+fi
+
 # Mixed precision: TPU-MLIR's qtable search keeps the layers that lose the
 # most accuracy in INT8 in BF16 instead.
 run run_calibration "$NAME.mlir" \
@@ -78,7 +83,8 @@ run run_calibration "$NAME.mlir" \
   --calibration_table "${NAME}_cali_table_mix" \
   --quantize_table "${NAME}_qtable"
 deploy mix --quantize INT8 --calibration_table "${NAME}_cali_table_mix" \
-  --quantize_table "${NAME}_qtable" --tolerance 0.8,0.4
+  --quantize_table "${NAME}_qtable" --tolerance 0.8,0.4 ||
+  echo "mix: accuracy check failed (expected, see docs/milkv-duo.md)"
 
 deploy int8 --quantize INT8 --calibration_table "${NAME}_cali_table" --tolerance 0.8,0.4 ||
   echo "int8: accuracy check failed (expected, see docs/milkv-duo.md)"
