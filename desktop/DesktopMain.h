@@ -30,6 +30,9 @@
 #include "TinyTTS/data/default_cmudict_slim_data.h"
 #include "TinyTTS/data/default_dictionary_model_data.h"
 #include "TinyTTS/data/default_weights_data.h"
+#ifdef TINYTTS_HAVE_CVI_TPU
+#include "TinyTTS/CviTpuVocoder.h"
+#endif
 
 #include <unistd.h>
 
@@ -79,6 +82,12 @@ class DesktopMain {
     tts_.setNumWorkers(opt.threads);
     tts_.setDecoderPrecision(opt.decoder_int8 ? tinytts::ops::DecoderPrecision::kInt8Activations
                                                : tinytts::ops::DecoderPrecision::kFloat32);
+#ifdef TINYTTS_HAVE_CVI_TPU
+    if (!opt.tpu_model.empty()) {
+      if (!tpu_.begin(opt.tpu_model.c_str(), opt.tpu_context)) return 1;
+      tts_.setVocoder(tpu_.vocoderFn());
+    }
+#endif
 
     bool should_play = !opt.no_play && opt.output_file.empty() && !opt.to_stdout;
     if (should_play) {
@@ -183,6 +192,8 @@ class DesktopMain {
     int threads = 2;  // matches TinyTTS::setNumWorkers()'s own default
     bool full_dict = false;
     bool decoder_int8 = false;
+    std::string tpu_model;
+    int tpu_context = 12;
     bool help_requested = false;
   };
 
@@ -221,6 +232,12 @@ class DesktopMain {
                   "                        desktop it's the identical quantization math run as\n"
                   "                        a scalar loop, so it changes quality only, not speed.\n"
                   "                        See docs/performance.md.\n"
+#ifdef TINYTTS_HAVE_CVI_TPU
+                  "  --tpu-model FILE      Run the decoder on the Milk-V Duo's TPU, from a\n"
+                  "                        cvimodel built by research/milkv_duo/build_cvimodel.sh\n"
+                  "                        (see docs/milkv-duo.md).\n"
+                  "  --tpu-context N       Overlap frames per side of each TPU window, default 12.\n"
+#endif
                   "\n"
                   "  -h, --help            Show this help text.\n",
                   prog, prog, prog, std::thread::hardware_concurrency());
@@ -286,6 +303,16 @@ class DesktopMain {
           std::fprintf(stderr, "--decoder-precision must be 'full' or 'int8', got: %s\n", v);
           return false;
         }
+#ifdef TINYTTS_HAVE_CVI_TPU
+      } else if (a == "--tpu-model") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.tpu_model = v;
+      } else if (a == "--tpu-context") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.tpu_context = std::atoi(v);
+#endif
       } else if (!a.empty() && a[0] == '-' && a != "-") {
         std::fprintf(stderr, "unknown option: %s\n", a.c_str());
         printUsage(argv[0]);
@@ -462,6 +489,9 @@ class DesktopMain {
 
   audio_tools::MiniAudioStream out_;
   audio_tools::BufferedStream buffered_out_{out_, kWriteChunkBytes};
+#ifdef TINYTTS_HAVE_CVI_TPU
+  CviTpuVocoder tpu_;  // before tts_: must outlive tts_'s use of it
+#endif
   TinyTTS tts_;
   std::vector<int16_t> pcm_buf_;
   std::vector<float> all_samples_;

@@ -39,6 +39,7 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
 | [`docs/model-data.md`](docs/model-data.md) | Model data sizes, how to wire up weights/dictionary buffers, where the data comes from. |
 | [`docs/esp-idf.md`](docs/esp-idf.md) | Building TinyTTS as a plain ESP-IDF component instead of an Arduino library. |
 | [`docs/tangnano20k.md`](docs/tangnano20k.md) | Running on the Sipeed Tang Nano 20K FPGA board, including its on-chip INT8 accelerator. |
+| [`docs/milkv-duo.md`](docs/milkv-duo.md) | Milk-V Duo 256M / Duo S: the decoder on the SG2002/SG2000 TPU, in fixed-size windows. |
 | [`docs/desktop.md`](docs/desktop.md) | The `desktop/` CLI (`tinytts`) -- building, installing, running, Unix piping. |
 | [`docs/performance.md`](docs/performance.md) | Real-hardware optimization history: what worked, what didn't, and why. |
 | [`docs/potential-improvements.md`](docs/potential-improvements.md) | What's still open for moving TinyTTS closer to real-time synthesis. |
