@@ -54,6 +54,7 @@ The flow and the decoder can optionally be replaced by an external implementatio
 | [`docs/desktop.md`](docs/desktop.md) | The `desktop/` CLI (`tinytts`) -- building, installing, running, Unix piping. |
 | [`docs/performance.md`](docs/performance.md) | Real-hardware optimization history: what worked, what didn't, and why. |
 | [`docs/potential-improvements.md`](docs/potential-improvements.md) | What's still open for moving TinyTTS closer to real-time synthesis. |
+| [`docs/phonemes.md`](docs/phonemes.md) | The phoneme symbols and stress tones the model takes, mapped to TinyTTSTools' phoneme ids. |
 | [`docs/text-input.md`](docs/text-input.md) | What you can pass to `speak()`, and the one real constraint on splitting text across calls. |
 | [`docs/limitations.md`](docs/limitations.md) | Status per platform and known limitations. |
 | [`docs/research.md`](docs/research.md) | The offline Python tooling (`research/`) used to investigate, export, and validate the model. |
