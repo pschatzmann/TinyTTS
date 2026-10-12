@@ -111,10 +111,16 @@ Voice tuning:
                         default full. 'int8' quantizes the decoder's conv1d() activations
                         to INT8 for an INT8xINT8 dot product -- audibly lossier on any
                         platform. On desktop this is always a scalar loop (quality-only
-                        A/B, not a speed test). On ESP32-S3 it's currently ALSO scalar,
-                        not faster, because the vendored SIMD kernel was found to be
-                        broken on real hardware and is disabled pending a fix -- see
-                        docs/performance.md for the measured numbers and the full story.
+                        A/B, not a speed test). On ESP32-S3 it uses a SIMD kernel, but is
+                        still slower than the float32 path -- see docs/performance.md.
+
+Milk-V Duo only (built with -DTINYTTS_CVI_TPU=ON, see docs/milkv-duo.md):
+  --tpu-model FILE      Run the decoder on the TPU, from a cvimodel built by
+                        research/milkv_duo/build_cvimodel.sh.
+  --tpu-context N       Overlap frames per side of each TPU window, default 12.
+  --tpu-flow FILE       Run the flow on the TPU, from a cvimodel built by
+                        research/milkv_duo/build_flow_cvimodels.sh. Repeat for each
+                        length; longer sentences use the CPU flow.
 
   -h, --help            Show this help text.
 ```
@@ -172,7 +178,7 @@ tinytts --decoder-precision int8 -o int8.wav "Hello world!"
   complete WAV covering every chunk (`onAudio()` appends each chunk's samples rather than
   overwriting).
 - **`BufferedStream` chunks the audio write.** `TinyTTS`'s `AudioChunkFn` fires once per
-  utterance with the *entire* waveform. Handing `MiniAudioStream::write()` all of that in one
+  utterance with the *entire* waveform (once per window with `--tpu-model`). Handing `MiniAudioStream::write()` all of that in one
   call overwhelms its internal ring-buffer backpressure (confirmed via a minimal,
   TinyTTS-free repro: one huge `write()` times out after filling exactly one ring-buffer's
   worth and never draining further; the same bytes written in ~2KB pieces succeed

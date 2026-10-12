@@ -16,6 +16,12 @@ matters if you're modifying it, debugging it, or curious.
 All four stages are hand-written C++ -- there is no TFLite Micro, or any other
 inference-runtime, dependency anywhere in this library.
 
+The flow and the decoder can be swapped for an external implementation at runtime:
+`TinyTTS::setFlow()` takes a `TinyTTSCore::FlowFn` (it may return false to fall back to the
+CPU flow), `TinyTTS::setVocoder()` a `TinyTTSCore::VocoderFn`. The only users so far are the
+Milk-V Duo's TPU wrappers (`CviTpuFlow`/`BucketedFlow`, `CviTpuVocoder`/`ChunkedVocoder`,
+see `docs/milkv-duo.md`), which are compiled only when `TINYTTS_HAVE_CVI_TPU` is defined.
+
 `text_encoder` and `flow` both use a **windowed relative-position attention** module that
 the ONNX→TFLite converter (`onnx2tf`) cannot handle (three different conversion bugs found
 across three attempted PyTorch-side workarounds, none fully resolved -- see `docs/research.md`

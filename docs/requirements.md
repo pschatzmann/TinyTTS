@@ -55,6 +55,9 @@ usage guide; the short version:
 - **A real-time audio device, only if you want to hear it play.** `-o`/`--stdout` (render to
   a WAV file or pipe) don't need a working audio device at all -- useful in headless/CI/
   sandboxed environments where live playback isn't available.
+- **Cross-compiling for the Milk-V Duo** (decoder and flow on its TPU) additionally needs
+  the T-Head musl toolchain, `tpu-sdk-sg200x` and, to build the TPU models, TPU-MLIR -- see
+  `docs/milkv-duo.md`.
 - No flash/PSRAM sizing to think about at all: the embedded model data (~4.2MB, see
   `docs/model-data.md`) is trivial for a desktop machine's storage/RAM, and there's no
   partition scheme or board setting of any kind to configure.

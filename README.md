@@ -11,6 +11,12 @@ inference-runtime dependency**, as an Arduino library. This is a proof of concep
 
 In addition you can build a command line program that you can run on your __desktop or microcomputer__.
 
+**Status:** runs on ESP32-S3/P4 and the Sipeed Tang Nano 20K (far from real time on all of
+them), and faster than real time on a desktop PC. A Milk-V Duo port that moves the flow and
+the decoder to the board's TPU is complete on the PC side but hasn't been run on the board
+yet. You can also train or fine-tune your own voice, including at a lower sample rate. See
+[`docs/limitations.md`](docs/limitations.md) for the details.
+
 
 ## Sample audio
 
@@ -30,6 +36,11 @@ pass with no fixed-input-shape window to hit, so `speak()` handles text of any l
 fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
 `docs/architecture.md` for the mechanical breakdown of each stage.
 
+The flow and the decoder can optionally be replaced by an external implementation
+(`setFlow()`/`setVocoder()`); the Milk-V Duo build uses this to run them on its TPU
+(`docs/milkv-duo.md`). That's the only place an inference runtime (the vendor's
+`libcviruntime`) is involved, and only in the desktop CLI built for that board.
+
 ## Documentation
 
 | Document | What's in it |
@@ -44,7 +55,7 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
 | [`docs/performance.md`](docs/performance.md) | Real-hardware optimization history: what worked, what didn't, and why. |
 | [`docs/potential-improvements.md`](docs/potential-improvements.md) | What's still open for moving TinyTTS closer to real-time synthesis. |
 | [`docs/text-input.md`](docs/text-input.md) | What you can pass to `speak()`, and the one real constraint on splitting text across calls. |
-| [`docs/limitations.md`](docs/limitations.md) | Status and known limitations. |
+| [`docs/limitations.md`](docs/limitations.md) | Status per platform and known limitations. |
 | [`docs/research.md`](docs/research.md) | The offline Python tooling (`research/`) used to investigate, export, and validate the model. |
 | [`docs/training.md`](docs/training.md) | Training or fine-tuning the model yourself (`research/training/`): LJSpeech, your own voice, adding languages. |
 
@@ -64,6 +75,9 @@ out of it, in short:
 - **It runs perfectly well on modern desktop computers and on faster microcomputers** (e.g.
   a Raspberry Pi 4) -- both comfortably close to or faster than real time, on the exact same
   unmodified code.
+- **Open: a TPU and a lower sample rate.** Whether the Milk-V Duo's TPU makes a cheap Linux
+  board usable (`docs/milkv-duo.md`) and how much a 16 kHz model saves on a microcontroller
+  (`docs/training.md`) haven't been measured on hardware yet.
 
 Real, flashed-hardware numbers for `speak("Hello world!")` (1.49s of resulting audio):
 
@@ -72,6 +86,7 @@ Real, flashed-hardware numbers for `speak("Hello world!")` (1.49s of resulting a
 | ESP32-S3 (unoptimized baseline) | ~439.7 s | -- | ~296x slower than real time |
 | ESP32-S3 (optimized) | ~34.1 s | ~12.9x faster | ~22.9x slower than real time |
 | ESP32-P4 (optimized) | ~28.4 s | ~15.5x faster | ~19x slower than real time |
+| Sipeed Tang Nano 20K (54MHz soft CPU, FPGA INT8 accelerator) | ~34 min | -- | ~1,400x slower than real time |
 | Raspberry Pi Zero W (desktop CLI, for reference) | ~15.68 s | ~28.0x faster | ~11.5x slower than real time |
 | Raspberry Pi 4 Model B (desktop CLI, `--threads 4`, for reference) | ~1.55 s | ~284x faster | ~1.04x slower than real time |
 | Desktop (optimized, for reference) | ~0.76 s | ~581x faster | ~0.51x -- *faster* than real time |
