@@ -1,0 +1,10 @@
+# Build context for research/training/docker/Dockerfile is research/: send
+# only what the image needs -- not the venv, the upstream clone, datasets,
+# checkpoints, or the historical ONNX/TFLite artifacts (several GB).
+*
+!export_weights_and_vectors.py
+!training/
+training/data/
+training/runs/
+**/__pycache__/
+**/*.pyc

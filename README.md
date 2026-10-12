@@ -46,6 +46,7 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
 | [`docs/text-input.md`](docs/text-input.md) | What you can pass to `speak()`, and the one real constraint on splitting text across calls. |
 | [`docs/limitations.md`](docs/limitations.md) | Status and known limitations. |
 | [`docs/research.md`](docs/research.md) | The offline Python tooling (`research/`) used to investigate, export, and validate the model. |
+| [`docs/training.md`](docs/training.md) | Training or fine-tuning the model yourself (`research/training/`): LJSpeech, your own voice, adding languages. |
 
 ## Conclusions
 
@@ -85,7 +86,8 @@ NEON path (~6%).
 Ported from [tronghieuit/tiny-tts](https://github.com/tronghieuit/tiny-tts), licensed
 Apache-2.0. The model architecture is VITS-style (windowed relative-position multi-head
 attention text encoder, normalizing-flow decoder, HiFi-GAN-style vocoder); see the upstream
-repository for training details and the original PyTorch implementation.
+repository for the original PyTorch implementation. Upstream publishes no training code;
+`research/training/` adds it (see `docs/training.md`).
 
 ## License
 

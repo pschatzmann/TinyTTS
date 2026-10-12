@@ -43,6 +43,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -90,22 +91,17 @@ class DesktopMain {
 #endif
 
     bool should_play = !opt.no_play && opt.output_file.empty() && !opt.to_stdout;
-    if (should_play) {
-      auto cfg = out_.defaultConfig(audio_tools::TX_MODE);
-      cfg.sample_rate = tts_.getAudioSampleRate();
-      // TinyTTS is always mono; MiniAudioConfig::defaultConfig() defaults
-      // to channels=2 -- must override explicitly or every other sample
-      // is silence (channel-swapped/interleaved garbage), an easy miss
-      // since it isn't the default.
-      cfg.channels = tts_.getAudioChannels();
-      cfg.bits_per_sample = tts_.getAudioBitsPerSample();
-      if (!out_.begin(cfg)) {
-        std::fprintf(stderr, "MiniAudioStream.begin() failed\n");
-        return 1;
-      }
-    }
 
-    tts_.setWeights(default_weights, default_weights_len);
+    if (opt.weights_file.empty()) {
+      tts_.setWeights(default_weights, default_weights_len);
+    } else {
+      // A weights.bin from research/export_weights_and_vectors.py (e.g. a
+      // model trained with research/training/) -- lets a new checkpoint be
+      // listened to without regenerating src/TinyTTS/data/*_data.h.
+      // setWeights() borrows the buffer, so it lives in a member.
+      if (!readFile(opt.weights_file, weights_buf_)) return 1;
+      tts_.setWeights(weights_buf_.data(), weights_buf_.size());
+    }
     if (opt.full_dict) {
       // The full dictionary instead of the slimmed one -- still paired
       // with the neural G2P fallback (for whatever even the full
@@ -127,6 +123,24 @@ class DesktopMain {
         })) {
       std::fprintf(stderr, "TinyTTS.begin() failed -- did you call all setters above?\n");
       return 1;
+    }
+
+    // After tts_.begin(): the sample rate comes from the weights (a model
+    // trained at e.g. 16 kHz says so in its weights.bin), and nothing is
+    // played before the first speak() below anyway.
+    if (should_play) {
+      auto cfg = out_.defaultConfig(audio_tools::TX_MODE);
+      cfg.sample_rate = tts_.getAudioSampleRate();
+      // TinyTTS is always mono; MiniAudioConfig::defaultConfig() defaults
+      // to channels=2 -- must override explicitly or every other sample
+      // is silence (channel-swapped/interleaved garbage), an easy miss
+      // since it isn't the default.
+      cfg.channels = tts_.getAudioChannels();
+      cfg.bits_per_sample = tts_.getAudioBitsPerSample();
+      if (!out_.begin(cfg)) {
+        std::fprintf(stderr, "MiniAudioStream.begin() failed\n");
+        return 1;
+      }
     }
 
     // Chunked, not one speak() call for the whole input: TinyTTS::speak()
@@ -190,6 +204,7 @@ class DesktopMain {
     float length_scale = 1.0f;
     int speaker = 0;
     int threads = 2;  // matches TinyTTS::setNumWorkers()'s own default
+    std::string weights_file;
     bool full_dict = false;
     bool decoder_int8 = false;
     std::string tpu_model;
@@ -224,6 +239,9 @@ class DesktopMain {
                   "                        one (still paired with the neural G2P fallback) --\n"
                   "                        see docs/model-data.md for why slimmed+G2P is the\n"
                   "                        recommended default even so.\n"
+                  "  --weights FILE        Load model weights (weights.bin, see\n"
+                  "                        docs/training.md) from FILE instead of the\n"
+                  "                        compiled-in default model.\n"
                   "  --decoder-precision full|int8\n"
                   "                        default full. 'int8' quantizes the decoder's conv1d\n"
                   "                        activations to INT8 for a real INT8xINT8 dot product\n"
@@ -289,6 +307,10 @@ class DesktopMain {
         const char* v = next(a.c_str());
         if (!v) return false;
         opt.threads = std::atoi(v);
+      } else if (a == "--weights") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.weights_file = v;
       } else if (a == "--full-dict") {
         opt.full_dict = true;
       } else if (a == "--decoder-precision") {
@@ -398,6 +420,17 @@ class DesktopMain {
     return true;
   }
 
+  /// Reads a whole binary file (--weights) into `out`.
+  static bool readFile(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) {
+      std::fprintf(stderr, "cannot open %s\n", path.c_str());
+      return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+  }
+
   // Same RIFF/WAVE header layout as test/main.cpp's write_wav(), just
   // targeting an arbitrary ostream (a file or std::cout) instead of always
   // a path, so -o/--output and --stdout can share one implementation. Volume
@@ -492,6 +525,9 @@ class DesktopMain {
 #ifdef TINYTTS_HAVE_CVI_TPU
   CviTpuVocoder tpu_;  // before tts_: must outlive tts_'s use of it
 #endif
+  // --weights data; declared before tts_ so it outlives it (setWeights()
+  // borrows the pointer).
+  std::vector<uint8_t> weights_buf_;
   TinyTTS tts_;
   std::vector<int16_t> pcm_buf_;
   std::vector<float> all_samples_;

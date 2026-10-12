@@ -53,6 +53,11 @@ export/conversion/quantization step is needed for anything the shipped library u
 `export_split_onnx.py`/`onnx2tf`/`gen_calibration_data.py` and everything under "ONNX →
 TFLite conversion" below are purely historical at this point (see that section).
 
+For training or fine-tuning your own checkpoint (`research/training/`), see
+[`training.md`](training.md). Two `export_weights_and_vectors.py` options exist for
+that: `--checkpoint G_<step>.pth` exports a trained checkpoint instead of the HuggingFace one,
+and `--out-dir DIR` writes `weights.bin`/`test_vectors.bin` somewhere other than `research/`.
+
 ## Validation scripts
 
 | Script | Validates |

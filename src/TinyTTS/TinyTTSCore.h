@@ -131,6 +131,11 @@ class TinyTTSCore {
     flow_.begin(weights_, n_flows, n_heads, window_size);
     duration_predictor_.begin(weights_);
     vocoder_.begin(weights_);
+    // meta.sample_rate: written by research/export_weights_and_vectors.py
+    // (models trained at another rate, see research/training/audio_config.py);
+    // absent in older weights.bin = the released 44.1 kHz model.
+    std::vector<float> sr = weights_.vec("meta.sample_rate");
+    sample_rate_ = sr.empty() ? kDefaultSampleRate : (int)sr[0];
 
     const DictionaryModel* dictionary_model_ptr = nullptr;
     if (dictionary_model_buf != nullptr && dictionary_model_len > 0) {
@@ -240,6 +245,10 @@ class TinyTTSCore {
     return info;
   }
 
+  /// The model's native output sample rate in Hz (valid after begin()).
+  int sampleRate() const { return sample_rate_; }
+  static constexpr int kDefaultSampleRate = 44100;  // tiny_tts.utils.config.SAMPLING_RATE
+
   // ---- component access, for testing / advanced use ----
   const PhonemeEncoder& encoder() const { return encoder_; }
   const Flow& flow() const { return flow_; }
@@ -260,6 +269,7 @@ class TinyTTSCore {
   VocoderFn external_vocoder_;
   Mat emb_g_;
   int gin_channels_ = 0;
+  int sample_rate_ = kDefaultSampleRate;
   bool started_ = false;
 };
 
