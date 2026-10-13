@@ -14,7 +14,8 @@ when you explicitly ask for it (see below).
   (real-time audio output via [miniaudio](https://miniaud.io/), works on Linux/macOS/Windows),
   wired together with the same embedded weights/dictionary data
   (`src/TinyTTS/data/default_weights_data.h` + the slimmed dictionary + neural G2P fallback)
-  `examples/tts_i2s_output/` uses.
+  `examples/tts_i2s_output/` uses. The compiled-in model can be replaced at runtime with
+  `--weights FILE` (see "Choosing a model" below).
 - `desktop/main.cpp` -- a one-line `main()` that just calls `DesktopMain::run(argc, argv)`.
 - `desktop/CMakeLists.txt` -- fetches `arduino-audio-tools` and `miniaudio.h`, builds the
   `tinytts` binary.
@@ -103,10 +104,11 @@ Voice tuning:
   --full-dict           Use the full CMU dictionary instead of the slimmed one (still
                         paired with the neural G2P fallback) -- see docs/model-data.md
                         for why slimmed+G2P is the recommended default even so.
-  --weights FILE        Load model weights (a weights.bin from
-                        research/export_weights_and_vectors.py) from FILE instead of the
-                        compiled-in default model -- e.g. a model you trained yourself,
-                        see docs/training.md.
+  --weights FILE        Load the model weights from FILE instead of the compiled-in
+                        default (44.1 kHz) model -- e.g. data/ljspeech16k_weights.bin or
+                        a weights.bin you trained/exported yourself (docs/training.md).
+                        The output sample rate comes from the file, so playback/WAV
+                        output follow it automatically.
   --decoder-precision full|int8
                         default full. 'int8' quantizes the decoder's conv1d() activations
                         to INT8 for an INT8xINT8 dot product -- audibly lossier on any
@@ -138,11 +140,44 @@ cat script.txt | tinytts --stdout | aplay
 # Quieter, slower, a different speaker
 tinytts --volume 0.4 --length-scale 1.3 --speaker 2 "Take it slow."
 
+# Use another model: the 16 kHz LJSpeech voice from data/ (see "Choosing a model")
+tinytts --weights data/ljspeech16k_weights.bin "Hello world!"
+tinytts --weights data/ljspeech16k_weights.bin -o hello16k.wav "Hello world!"
+
 # A/B the INT8-activation decoder prototype (quality only on desktop -- see
 # docs/performance.md; real speed only shows up on ESP32)
 tinytts -o full.wav "Hello world!"
 tinytts --decoder-precision int8 -o int8.wav "Hello world!"
 ```
+
+### Choosing a model
+
+Without `--weights`, `tinytts` uses the model compiled into the binary
+(`src/TinyTTS/data/default_weights_data.h`, the released 44.1 kHz voice). `--weights FILE` loads a
+different model's weights from a file at startup, with no rebuild needed. The dictionary and
+neural G2P fallback stay the compiled-in English ones; they don't depend on the voice.
+
+| File | Model |
+|---|---|
+| *(no `--weights`)* or `data/default_weights.bin` | Released model, 44.1 kHz |
+| `data/ljspeech16k_weights.bin` | LJSpeech voice trained with `research/training/`, 16 kHz, about 2x faster to synthesize |
+| any `weights.bin` from `research/export_weights_and_vectors.py` | Your own model, e.g. `--checkpoint G_<N>.pth --out-dir <dir>` (see `docs/training.md`) |
+
+A weights file records its own output sample rate. `tinytts` reads it at startup and uses it
+for playback, for the `-o`/`--stdout` WAV header and for the playback duration. So a 16 kHz
+model plays at the right speed with no extra option. Files exported before the sample-rate
+option existed carry no rate and are treated as 44.1 kHz, which is correct for them.
+
+`--weights` is also the quickest way to try a training checkpoint. Export it, then listen:
+
+```sh
+cd research && ./venv/bin/python export_weights_and_vectors.py \
+    --checkpoint training/runs/ljspeech16k/G_40000.pth --out-dir /tmp/g40000 && cd ..
+./build/desktop/tinytts --weights /tmp/g40000/weights.bin "Hello world!"
+```
+
+If the file can't be opened, `tinytts` exits with `cannot open FILE`. If it isn't a valid
+weights file, `begin()` fails with `TinyTTS.begin() failed`.
 
 ## Design notes (why it's built this way)
 
