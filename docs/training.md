@@ -220,6 +220,19 @@ Listen to it with the desktop CLI (see `docs/desktop.md`), without touching the 
 ./build/desktop/tinytts --weights research/training/runs/ljspeech/export/weights.bin -o hello.wav "Hello world!"
 ```
 
+To compile it into a sketch alongside the default model, generate an additional header from it
+(`src/TinyTTS/data/<name>_weights_data.h`, variable `<name>_weights`):
+
+```bash
+cd research
+python export_headers.py --weights training/runs/ljspeech16k/export/weights.bin --name ljspeech16k
+```
+
+Then pass `tts.setWeights(ljspeech16k_weights, ljspeech16k_weights_len)` before `begin()`.
+`examples/timing_benchmark` does this when `TINYTTS_BENCH_16K` is defined (uncomment it at the
+top of the sketch). It prints the model's sample rate, the per-stage timing and the real-time
+factor, so the 44.1 kHz and 16 kHz models can be compared on the same board.
+
 To ship it as the library's built-in model, export into `research/` itself (omit `--out-dir`)
 and regenerate the headers with `python export_headers.py`. The dictionary and the G2P
 fallback model don't change, because they depend on the language and not on the voice.

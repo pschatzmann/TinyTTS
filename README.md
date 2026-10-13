@@ -49,6 +49,7 @@ built for that board.
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | Why each of the four model stages is built the way it is, plus a data-flow diagram. |
 | [`docs/requirements.md`](docs/requirements.md) | Board/library requirements -- flash/PSRAM sizing, board settings, the optional SIMD speedup. |
+| [`data/`](data/README.md) | The model data as `.bin` files for loading from LittleFS/FFat/SD (or `tinytts --weights`), incl. the 16 kHz model. |
 | [`docs/model-data.md`](docs/model-data.md) | Model data sizes, how to wire up weights/dictionary buffers, where the data comes from. |
 | [`docs/esp-idf.md`](docs/esp-idf.md) | Building TinyTTS as a plain ESP-IDF component instead of an Arduino library. |
 | [`docs/tangnano20k.md`](docs/tangnano20k.md) | Running on the Sipeed Tang Nano 20K FPGA board, including its on-chip INT8 accelerator. |
@@ -75,26 +76,37 @@ out of it, in short:
   PSRAM usage after `begin()` was only **~743 KB** -- flash/RAM was never the constraint.
 - **Microcontrollers are too slow to generate audio in real time.** Even after a full
   optimization pass (INT8 weight quantization, tiled weight caching, SIMD-accelerated dot
-  products), the fastest ESP32 measured is still ~19-32x slower than real time.
+  products), the fastest ESP32 measured (ESP32-P4) is still ~13x slower than real time
+  with the default 44.1 kHz model -- ~8x with a model trained for 16 kHz output (see
+  `docs/training.md`).
 - **It runs perfectly well on modern desktop computers and on faster microcomputers** (e.g.
   a Raspberry Pi 4) -- both comfortably close to or faster than real time, on the exact same
   unmodified code.
-- **Open: a TPU and a lower sample rate.** Whether the Milk-V Duo's TPU makes a cheap Linux
-  board usable (`docs/milkv-duo.md`) and how much a 16 kHz model saves on a microcontroller
-  (`docs/training.md`) haven't been measured on hardware yet.
+- **A small GPU is enough for real time.** On a Raspberry Pi Zero W, running the flow and
+  the decoder on its VideoCore IV GPU (`docs/rpi-zero-gpu.md`) takes "Hello world!" from
+  ~15.7 s to ~0.58 s of synthesis -- faster than real time.
+- **Open: a TPU.** Whether the Milk-V Duo's TPU makes a cheap Linux board usable
+  (`docs/milkv-duo.md`) hasn't been measured on hardware yet.
 
-Real, flashed-hardware numbers for `speak("Hello world!")` (1.49s of resulting audio):
+Real, flashed-hardware numbers for `speak("Hello world!")`:
 
-| Board | Total time | vs. unoptimized baseline | Real-time factor |
-|---|---:|---:|---:|
-| ESP32-S3 (unoptimized baseline) | ~439.7 s | -- | ~296x slower than real time |
-| ESP32-S3 (optimized) | ~34.1 s | ~12.9x faster | ~22.9x slower than real time |
-| ESP32-P4 (optimized) | ~28.4 s | ~15.5x faster | ~19x slower than real time |
-| Sipeed Tang Nano 20K (54MHz soft CPU, FPGA INT8 accelerator) | ~34 min | -- | ~1,400x slower than real time |
-| Raspberry Pi Zero W (desktop CLI, for reference) | ~15.68 s | ~28.0x faster | ~11.5x slower than real time |
-| Raspberry Pi Zero W (desktop CLI, flow and decoder on the GPU, `--qpu`) | ~0.58 s synthesis (1.0 s with startup) | ~760x faster | ~0.39x -- *faster* than real time |
-| Raspberry Pi 4 Model B (desktop CLI, `--threads 4`, for reference) | ~1.55 s | ~284x faster | ~1.04x slower than real time |
-| Desktop (optimized, for reference) | ~0.76 s | ~581x faster | ~0.51x -- *faster* than real time |
+| Board | Model | Audio | Total time | Real-time factor |
+|---|---|---:|---:|---:|
+| ESP32-S3 | 44.1 kHz (default) | 1.49 s | ~33.9 s | ~22.8x slower than real time |
+| ESP32-S3 | 16 kHz (trained, see `docs/training.md`) | 1.12 s | ~15.3 s | ~13.7x slower than real time |
+| ESP32-P4 | 44.1 kHz (default) | 1.49 s | ~19.6 s | ~13.2x slower than real time |
+| ESP32-P4 | 16 kHz (trained, see `docs/training.md`) | 1.12 s | ~9.2 s | ~8.2x slower than real time |
+| Sipeed Tang Nano 20K (54MHz soft CPU, FPGA INT8 accelerator) | 44.1 kHz (default) | 1.49 s | ~34 min | ~1,400x slower than real time |
+| Raspberry Pi Zero W (desktop CLI) | 44.1 kHz (default) | 1.49 s | ~15.68 s | ~11.5x slower than real time |
+| Raspberry Pi Zero W (desktop CLI, flow and decoder on the GPU, `--qpu`) | 44.1 kHz (default) | 1.49 s | ~0.58 s (1.0 s with startup) | ~0.39x -- *faster* than real time |
+| Raspberry Pi 4 Model B (desktop CLI, `--threads 4`) | 44.1 kHz (default) | 1.49 s | ~1.55 s | ~1.04x slower than real time |
+| Desktop | 44.1 kHz (default) | 1.49 s | ~0.76 s | ~0.51x -- *faster* than real time |
+
+The 16 kHz model is a different voice (LJSpeech) with its own speaking rate, hence the shorter
+audio for the same text; compare the real-time factors. Its vocoder has one upsampling stage
+fewer and produces ~2.75x fewer samples per second, which cuts the dominant vocoder stage from
+~29.9 s to ~13.0 s on the ESP32-S3 (~17.5 s to ~7.9 s on the ESP32-P4). The ESP32-P4 numbers
+are from a v3.2 chip (`ChipVariant=postv3`) on Arduino-ESP32 3.3.
 
 See `docs/performance.md` for the complete optimization story and per-board/per-stage
 breakdowns, including a real ESP32-S3 hardware measurement of the weight-tile-transpose
