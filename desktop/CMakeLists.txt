@@ -91,6 +91,14 @@ if(TINYTTS_CVI_TPU)
   target_link_options(tinytts_desktop PRIVATE "-Wl,-rpath-link,${CVIRUNTIME_LIB_DIR}")
 endif()
 
+# Raspberry Pi 1 / Zero: the decoder on the VideoCore IV GPU (QpuVocoder,
+# --qpu), see docs/rpi-zero-gpu.md. No extra libraries: the kernels are
+# compiled in.
+option(TINYTTS_RPI_QPU "Build the desktop CLI with the Raspberry Pi 1/Zero GPU vocoder (--qpu)" OFF)
+if(TINYTTS_RPI_QPU)
+  target_compile_definitions(tinytts_desktop PRIVATE TINYTTS_HAVE_RPI_QPU)
+endif()
+
 # Without this, `cmake --install`/`make install` silently installs nothing
 # of ours at all (only arduino-audio-tools' own headers, as an incidental
 # side effect of its unrelated install() rules) -- there's no default

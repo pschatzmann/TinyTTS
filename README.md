@@ -38,8 +38,10 @@ fallback model (`DictionaryModel`) covers words the dictionary doesn't. See
 
 The flow and the decoder can optionally be replaced by an external implementation
 (`setFlow()`/`setVocoder()`); the Milk-V Duo build uses this to run them on its TPU
-(`docs/milkv-duo.md`). That's the only place an inference runtime (the vendor's
-`libcviruntime`) is involved, and only in the desktop CLI built for that board.
+(`docs/milkv-duo.md`), and the Raspberry Pi Zero build runs both on its GPU with
+hand-written QPU kernels (`docs/rpi-zero-gpu.md`). The Milk-V build is the only place an
+inference runtime (the vendor's `libcviruntime`) is involved, and only in the desktop CLI
+built for that board.
 
 ## Documentation
 
@@ -51,6 +53,7 @@ The flow and the decoder can optionally be replaced by an external implementatio
 | [`docs/esp-idf.md`](docs/esp-idf.md) | Building TinyTTS as a plain ESP-IDF component instead of an Arduino library. |
 | [`docs/tangnano20k.md`](docs/tangnano20k.md) | Running on the Sipeed Tang Nano 20K FPGA board, including its on-chip INT8 accelerator. |
 | [`docs/milkv-duo.md`](docs/milkv-duo.md) | Milk-V Duo 256M / Duo S: the decoder on the SG2002/SG2000 TPU, in fixed-size windows. |
+| [`docs/rpi-zero-gpu.md`](docs/rpi-zero-gpu.md) | Raspberry Pi Zero: the flow and the decoder on the VideoCore IV GPU (`--qpu`) -- faster than real time. |
 | [`docs/desktop.md`](docs/desktop.md) | The `desktop/` CLI (`tinytts`) -- building, installing, running, Unix piping. |
 | [`docs/performance.md`](docs/performance.md) | Real-hardware optimization history: what worked, what didn't, and why. |
 | [`docs/potential-improvements.md`](docs/potential-improvements.md) | What's still open for moving TinyTTS closer to real-time synthesis. |
@@ -89,6 +92,7 @@ Real, flashed-hardware numbers for `speak("Hello world!")` (1.49s of resulting a
 | ESP32-P4 (optimized) | ~28.4 s | ~15.5x faster | ~19x slower than real time |
 | Sipeed Tang Nano 20K (54MHz soft CPU, FPGA INT8 accelerator) | ~34 min | -- | ~1,400x slower than real time |
 | Raspberry Pi Zero W (desktop CLI, for reference) | ~15.68 s | ~28.0x faster | ~11.5x slower than real time |
+| Raspberry Pi Zero W (desktop CLI, flow and decoder on the GPU, `--qpu`) | ~0.58 s synthesis (1.0 s with startup) | ~760x faster | ~0.39x -- *faster* than real time |
 | Raspberry Pi 4 Model B (desktop CLI, `--threads 4`, for reference) | ~1.55 s | ~284x faster | ~1.04x slower than real time |
 | Desktop (optimized, for reference) | ~0.76 s | ~581x faster | ~0.51x -- *faster* than real time |
 

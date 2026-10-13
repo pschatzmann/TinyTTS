@@ -122,6 +122,12 @@ Milk-V Duo only (built with -DTINYTTS_CVI_TPU=ON, see docs/milkv-duo.md):
                         research/milkv_duo/build_flow_cvimodels.sh. Repeat for each
                         length; longer sentences use the CPU flow.
 
+Raspberry Pi 1/Zero only (built with -DTINYTTS_RPI_QPU=ON, see docs/rpi-zero-gpu.md):
+  --qpu                 Run the flow and the decoder on the GPU (needs root and
+                        vc4-kms-v3d disabled).
+  --qpu-frames N        Longest sentence for the GPU, in frames, default 512
+                        (~6 s of audio); longer ones run on the CPU.
+
   -h, --help            Show this help text.
 ```
 
