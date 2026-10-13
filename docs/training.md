@@ -20,7 +20,7 @@ trained model can't drift from what the C++ port implements.
 
 | File | What it does |
 |---|---|
-| `prepare_dataset.py` | LJSpeech-layout dataset (`metadata.csv` + `wavs/`) → audio resampled to 44.1 kHz + `train.txt`/`val.txt` filelists. Phonemization happens here, once. |
+| `prepare_dataset.py` | LJSpeech-layout dataset (`metadata.csv` + `wavs/`) → audio resampled to `--sample-rate` (default 44.1 kHz, see "Sample rate") + `train.txt`/`val.txt` filelists. Phonemization happens here, once. |
 | `frontends/` | Text → phone/tone/language ids, one module per language. `en.py` is upstream's own English pipeline (CMU dictionary + g2p_en fallback). |
 | `audio_config.py` | Derives hop, STFT, mel and vocoder layout from the output sample rate (see "Sample rate"). |
 | `model_train.py` | `TrainableSynthesizer`: upstream `VoiceSynthesizer` plus MeloTTS's training `forward()` (MAS alignment, duration losses, random decoder slices). Adds no parameters. |

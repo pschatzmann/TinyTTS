@@ -20,3 +20,6 @@ build_*/
 
 # host-side test binary
 test/test_main
+
+# research/milkv_duo/export_decoder_tpu.py output (ONNX, calibration data)
+research/milkv_duo/out/

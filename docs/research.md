@@ -58,6 +58,10 @@ For training or fine-tuning your own checkpoint (`research/training/`), see
 that: `--checkpoint G_<step>.pth` exports a trained checkpoint instead of the HuggingFace one,
 and `--out-dir DIR` writes `weights.bin`/`test_vectors.bin` somewhere other than `research/`.
 
+`research/milkv_duo/` exports the decoder and the flow as ONNX for the Milk-V Duo's TPU,
+compiles them with TPU-MLIR and validates them in its simulator -- the one place ONNX is
+still used today. See [`milkv-duo.md`](milkv-duo.md).
+
 ## Validation scripts
 
 | Script | Validates |

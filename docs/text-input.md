@@ -12,9 +12,12 @@ one real constraint on how you split it up.
 - Every model stage (`duration_predictor`/`Vocoder.h` included) is hand-written C++, run in
   a single pass over the whole utterance -- no TFLite Micro fixed-input-shape window to hit
   anywhere, so a single `speak()` call handles text of any length with no phoneme-count
-  ceiling at all. The tradeoff: `speak()` hands its callback the *whole* utterance's audio
-  once synthesis finishes -- there's no partial audio streamed out mid-computation within
-  one call, so a very long single `speak()` call means more time before any sound starts.
+  ceiling at all. The tradeoff: with the built-in CPU vocoder, `speak()` hands its callback
+  the *whole* utterance's audio once synthesis finishes -- there's no partial audio streamed
+  out mid-computation within one call, so a very long single `speak()` call means more time
+  before any sound starts. (An external vocoder set with `setVocoder()`, such as the Milk-V
+  Duo's `ChunkedVocoder`, calls the callback once per window instead -- see
+  `docs/milkv-duo.md`.)
 
 ## Splitting text across multiple `speak()` calls
 

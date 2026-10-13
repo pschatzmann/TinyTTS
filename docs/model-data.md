@@ -42,10 +42,12 @@ doesn't cover:
 
 See `docs/architecture.md` for why the sizes above are what they are.
 
-An 8MB-flash module can't fit either combination compiled into flash alongside app code —
-pick which pieces to embed and which to load from storage (the dictionary is the one worth
-moving to external storage first). A 16MB-flash module can embed everything, as
-`examples/tts_i2s_output/` does.
+A 16MB-flash module can embed everything, as `examples/tts_i2s_output/` does. An 8MB-flash
+module can too, with a custom partition table whose app partition holds the data plus ~0.3MB
+of code (measured: a 4.54MB image for the recommended set), but not with the stock
+partition schemes or with OTA's two app slots. Otherwise pick which pieces to embed and which
+to load from storage (the dictionary is the one worth moving first). For PSRAM sizing, see
+`docs/requirements.md`.
 
 ## Wiring it up
 

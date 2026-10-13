@@ -161,9 +161,11 @@ ratio (1.59x vs. 1.67x) while `encoder`/`duration_predictor` scale slightly more
 both clock speeds, while the smaller stages have more non-SIMD (scalar,
 memory-management) overhead that may benefit differently from P4's newer core.
 
-Combined with the 16kHz retraining projection below (not yet done, so still an estimate
-on top of a real measurement): **P4 @ 16kHz projected ~11 s**, vs. the current S3 @
-44.1kHz 47.1s -- about 4.3x faster.
+Combined with the 16kHz retraining projection in `docs/potential-improvements.md` (still
+an estimate on top of a real measurement -- `research/training/` can now train a 16kHz
+model, see `docs/training.md`, but none has been timed on a microcontroller yet): **P4 @
+16kHz projected ~11 s**, vs. the S3 @ 44.1kHz 47.1s of the same optimization stage --
+about 4.3x faster.
 
 ## Cross-platform: Raspberry Pi (desktop CLI, measured)
 
@@ -509,6 +511,14 @@ slower than real time. The one change that also helps other platforms: attention
 relative-position terms are only computed inside their +-4-frame window, where the
 embeddings are non-zero (exact, about half of attention's work for long inputs). See
 `docs/tangnano20k.md`.
+
+## Milk-V Duo: decoder and flow on the TPU (not yet measured)
+
+The Milk-V Duo 256M / Duo S port runs the desktop CLI on the C906 CPU, with the decoder
+(in fixed-size overlapping windows) and the flow (padded to fixed lengths) on the
+SG2002/SG2000 TPU in BF16. It's verified for accuracy on a PC (TPU-MLIR's simulator, a fake
+runtime for the C++ wrappers), but hasn't been run on the board, so there are no timing
+numbers yet. See `docs/milkv-duo.md`.
 
 ## What was tried and didn't work (or wasn't worth it)
 

@@ -227,6 +227,80 @@ static void testVocoder(ReferenceData& ref) {
     check(cos > 0.998, "Vocoder.forward matches reference");
 }
 
+// ChunkedVocoder window function running the CPU Vocoder: decodes the
+// valid rows only and zeroes the rest of the output.
+static ChunkedVocoder::WindowFn cpuWindowFn(const Vocoder& dec) {
+    return [&dec](const Mat& zw, int vb, int ve, const Mat& gw, float* audio) {
+        Mat zv(ve - vb, zw.cols());
+        for (int t = vb; t < ve; t++) std::copy(zw.row(t), zw.row(t) + zw.cols(), zv.row(t - vb));
+        auto a = dec.forward(zv, gw);
+        std::fill(audio, audio + (size_t)zw.rows() * 512, 0.0f);
+        std::copy(a.begin(), a.end(), audio + (size_t)vb * 512);
+        return true;
+    };
+}
+
+// ChunkedVocoder (the schedule the Milk-V Duo's TPU path uses, see
+// docs/milkv-duo.md) with the CPU Vocoder as the window function, against
+// the one-pass decode of the same z. The CPU window function decodes only
+// the valid rows, which is what the TPU model's mask input does. Context 12
+// matches to float rounding; random-phoneme test vectors don't start/end in
+// silence, so this also checks the edge windows.
+static void testChunkedVocoder(ReferenceData& ref) {
+    Vocoder dec;
+    dec.begin(ref.weights);
+    Mat g = channel_first_1_to_row(*ref.vectors.get("g"));
+    Mat z = channel_first_to_TC(*ref.vectors.get("z_ref"));
+    printf("\n=== ChunkedVocoder (T=%d) ===\n", z.rows());
+    auto whole = dec.forward(z, g);
+
+    const int windows[] = {32, 64, 128};
+    for (int W : windows) {
+        ChunkedVocoder chunked;
+        bool began = chunked.begin(cpuWindowFn(dec), W, /*context=*/12);
+        std::vector<float> out;
+        int calls = 0;
+        bool ok = began && chunked.forward(z, g, [&](const float* s, size_t n) {
+            out.insert(out.end(), s, s + n);
+            calls++;
+        });
+        double sig = 0, noise = 0;
+        for (size_t i = 0; i < out.size() && i < whole.size(); i++) {
+            sig += (double)whole[i] * whole[i];
+            noise += ((double)whole[i] - out[i]) * ((double)whole[i] - out[i]);
+        }
+        double snr = 10 * std::log10(sig / (noise + 1e-30));
+        printf("W=%d: %d window(s), SNR vs. one pass %.1f dB\n", W, calls, snr);
+        char label[96];
+        snprintf(label, sizeof(label), "ChunkedVocoder W=%d matches one-pass Vocoder", W);
+        check(ok && out.size() == whole.size() && snr > 100.0, label);
+    }
+
+    ChunkedVocoder bad;
+    check(!bad.begin(cpuWindowFn(dec), 20, 10), "ChunkedVocoder rejects window <= 2*context");
+}
+
+// TinyTTSCore::setVocoder(): the replacement runs instead of the built-in
+// vocoder and its chunks reach the audio callback in order.
+static void testExternalVocoder(const std::vector<uint8_t>& weights_buf, const std::vector<uint8_t>& cmudict_buf) {
+    printf("\n=== TinyTTSCore::setVocoder ===\n");
+    TinyTTSCore tts;
+    tts.begin(weights_buf.data(), weights_buf.size(), cmudict_buf.data(), cmudict_buf.size());
+    ChunkedVocoder chunked;
+    chunked.begin(cpuWindowFn(tts.vocoder()), 64, 12);
+    tts.setVocoder([&](const Mat& z, const Mat& g, const TinyTTSCore::AudioChunkFn& on_audio) {
+        return chunked.forward(z, g, on_audio);
+    });
+    size_t samples = 0;
+    int calls = 0;
+    SynthesisInfo info = tts.synthesize("Hello world!", [&](const float*, size_t n) {
+        samples += n;
+        calls++;
+    });
+    printf("y_len=%d, %d callback(s), %zu samples\n", info.y_len, calls, samples);
+    check(calls > 1 && samples == (size_t)info.y_len * 512, "external vocoder streams the whole utterance");
+}
+
 // Hand-written DurationPredictor forward pass against the PyTorch reference
 // (tiny_tts.models.synthesizer.DurationEstimator, `net_g.dp`). Replaces the
 // TFLite Micro duration_predictor model -- plain Conv1d/ChannelNorm/ReLU, no
@@ -477,6 +551,7 @@ int main() {
     PhonemeEncoderOutput enc_out = testPhonemeEncoder(ref, n_heads, window_size);
     testFlow(ref, n_flows, n_heads, window_size);
     testVocoder(ref);
+    testChunkedVocoder(ref);
     std::vector<float> logw = testDurationPredictor(ref, enc_out);
     testAlignment(ref, enc_out, logw);
     testCmuDict(ref.cmudict_buf);
@@ -484,6 +559,7 @@ int main() {
     testTinyTTSCoreOrchestration(ref.weights_buf, ref.cmudict_buf);
     testTinyTTSFacadeRealModels(ref.weights_buf, ref.cmudict_buf);
     testLongText(ref.weights_buf, ref.cmudict_buf);
+    testExternalVocoder(ref.weights_buf, ref.cmudict_buf);
     testTinyTTSFacadeSketchData();
 
     printf("\n%d check(s) failed.\n", failures);

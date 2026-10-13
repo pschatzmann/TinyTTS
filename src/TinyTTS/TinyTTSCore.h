@@ -14,6 +14,8 @@
 #endif
 
 #include "TinyTTS/Alignment.h"
+#include "TinyTTS/BucketedFlow.h"
+#include "TinyTTS/ChunkedVocoder.h"
 #include "TinyTTS/CmuDict.h"
 #include "TinyTTS/DictionaryModel.h"
 #include "TinyTTS/DurationPredictor.h"
@@ -87,10 +89,10 @@ struct SynthesisInfo {
  *
  * Because none of the four stages has a TFLite Micro fixed-input-shape
  * constraint, synthesize() runs the whole utterance through in a single
- * pass, then hands the complete PCM buffer to `on_audio` once -- there is no
- * chunk-by-chunk streaming-while-decoding here (that was a side effect of
- * TFLM's fixed-shape decoder needing a window in the first place, not an
- * independent design goal).
+ * pass, then hands the complete PCM buffer to `on_audio` once. The
+ * exception is an external vocoder set with setVocoder() (e.g. a
+ * ChunkedVocoder running on the Milk-V Duo's TPU, see docs/milkv-duo.md),
+ * which may call `on_audio` several times per utterance.
  *
  * @author Phil Schatzmann
  * @copyright Apache-2.0
@@ -98,8 +100,28 @@ struct SynthesisInfo {
 class TinyTTSCore {
  public:
   /// Called once, with the whole utterance's PCM samples, when synthesis
-  /// finishes -- e.g. write them straight to an I2SStream.
+  /// finishes -- e.g. write them straight to an I2SStream. With an external
+  /// vocoder (setVocoder()) it may be called several times per utterance,
+  /// with consecutive pieces of it.
   using AudioChunkFn = std::function<void(const float* samples, size_t count)>;
+
+  /// Replacement for the built-in Vocoder: decodes z [T, inter_channels]
+  /// with speaker embedding g [1, gin_channels] and hands the PCM to
+  /// `on_audio`. Returns false on failure.
+  using VocoderFn = std::function<bool(const Mat& z, const Mat& g, const AudioChunkFn& on_audio)>;
+
+  /// Runs `fn` instead of the built-in CPU Vocoder (e.g. a ChunkedVocoder on
+  /// an NPU). An empty function restores the built-in one.
+  void setVocoder(VocoderFn fn) { external_vocoder_ = std::move(fn); }
+
+  /// Replacement for the built-in Flow (reverse direction): z_p [T,
+  /// inter_channels] -> z. Returning false (e.g. for an utterance longer
+  /// than the replacement supports) falls back to the built-in CPU Flow.
+  using FlowFn = std::function<bool(const Mat& z_p, const Mat& g, Mat& z)>;
+
+  /// Runs `fn` instead of the built-in CPU Flow when it can (e.g. a
+  /// BucketedFlow on an NPU). An empty function restores the built-in one.
+  void setFlow(FlowFn fn) { external_flow_ = std::move(fn); }
 
   /// Loads model weights and the CMU dictionary from in-memory buffers
   /// (flash-embedded const arrays, or buffers read from LittleFS/SD at
@@ -196,13 +218,33 @@ class TinyTTSCore {
         z_p.at(t, c) = m_p_exp.at(t, c) + normal(rng) * std::exp(logs_p_exp.at(t, c)) * noise_scale;
 
     uint32_t t_flow0 = timingMillis();
-    Mat z = flow_.reverse(z_p, g);
-    timingLog("[TinyTTS] flow: %lu ms\n", (unsigned long)(timingMillis() - t_flow0));
+    Mat z;
+    const char* flow_where = "";
+    if (external_flow_ && external_flow_(z_p, g, z)) {
+      flow_where = " (external)";
+    } else {
+      if (external_flow_) flow_where = " (external flow failed, used CPU)";
+      z = flow_.reverse(z_p, g);
+    }
+    timingLog("[TinyTTS] flow: %lu ms%s\n", (unsigned long)(timingMillis() - t_flow0), flow_where);
 
     uint32_t t_dec0 = timingMillis();
-    auto audio = vocoder_.forward(z, g);
-    timingLog("[TinyTTS] vocoder: %lu ms, samples=%u\n", (unsigned long)(timingMillis() - t_dec0),
-              (unsigned)audio.size());
+    PsramVector<float> audio;
+    if (external_vocoder_) {
+      // Streams straight to on_audio, so this time includes whatever
+      // on_audio itself spends (e.g. blocking on a full output buffer).
+      size_t samples = 0;
+      bool ok = external_vocoder_(z, g, [&](const float* s, size_t n) {
+        samples += n;
+        if (on_audio) on_audio(s, n);
+      });
+      timingLog("[TinyTTS] vocoder: %lu ms, samples=%u%s\n", (unsigned long)(timingMillis() - t_dec0),
+                (unsigned)samples, ok ? "" : " (failed)");
+    } else {
+      audio = vocoder_.forward(z, g);
+      timingLog("[TinyTTS] vocoder: %lu ms, samples=%u\n", (unsigned long)(timingMillis() - t_dec0),
+                (unsigned)audio.size());
+    }
 
 #ifdef TINYTTS_PROFILE
     for (int i = 0; i < profile::kSlotCount; i++) {
@@ -213,7 +255,7 @@ class TinyTTSCore {
     }
 #endif
 
-    if (on_audio) on_audio(audio.data(), audio.size());
+    if (on_audio && !external_vocoder_) on_audio(audio.data(), audio.size());
 
     info.durations = std::move(durations);
     info.y_len = t_y;
@@ -241,6 +283,8 @@ class TinyTTSCore {
   DurationPredictor duration_predictor_;
   Vocoder vocoder_;
   TextG2P g2p_;
+  VocoderFn external_vocoder_;
+  FlowFn external_flow_;
   Mat emb_g_;
   int gin_channels_ = 0;
   int sample_rate_ = kDefaultSampleRate;

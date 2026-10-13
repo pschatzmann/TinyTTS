@@ -74,6 +74,23 @@ if(CMAKE_SYSTEM_PROCESSOR STREQUAL "armv6l")
     -mcpu=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard -funsafe-math-optimizations)
 endif()
 
+# Milk-V Duo 256M / Duo S: runs the decoder on the TPU (--tpu-model), see
+# docs/milkv-duo.md. TPU_SDK_DIR points at a checkout of
+# https://github.com/milkv-duo/tpu-sdk-sg200x (include/cviruntime.h,
+# lib/libcviruntime.so) built for the same CPU as this binary.
+option(TINYTTS_CVI_TPU "Build the desktop CLI with the CVITEK TPU vocoder (Milk-V Duo)" OFF)
+set(TPU_SDK_DIR "" CACHE PATH "tpu-sdk-sg200x directory (include/, lib/)")
+if(TINYTTS_CVI_TPU)
+  find_path(CVIRUNTIME_INCLUDE_DIR cviruntime.h HINTS ${TPU_SDK_DIR}/include NO_CMAKE_FIND_ROOT_PATH REQUIRED)
+  find_library(CVIRUNTIME_LIBRARY cviruntime HINTS ${TPU_SDK_DIR}/lib NO_CMAKE_FIND_ROOT_PATH REQUIRED)
+  get_filename_component(CVIRUNTIME_LIB_DIR ${CVIRUNTIME_LIBRARY} DIRECTORY)
+  target_include_directories(tinytts_desktop PRIVATE ${CVIRUNTIME_INCLUDE_DIR})
+  target_compile_definitions(tinytts_desktop PRIVATE TINYTTS_HAVE_CVI_TPU)
+  # libcviruntime.so pulls in libcvikernel.so etc. from the same directory.
+  target_link_libraries(tinytts_desktop PRIVATE ${CVIRUNTIME_LIBRARY})
+  target_link_options(tinytts_desktop PRIVATE "-Wl,-rpath-link,${CVIRUNTIME_LIB_DIR}")
+endif()
+
 # Without this, `cmake --install`/`make install` silently installs nothing
 # of ours at all (only arduino-audio-tools' own headers, as an incidental
 # side effect of its unrelated install() rules) -- there's no default

@@ -120,6 +120,16 @@ class TinyTTS {
   /// before begin()/speak(), since it's read fresh on every conv1d() call.
   void setDecoderPrecision(ops::DecoderPrecision p) { ops::setDecoderPrecision(p); }
 
+  /// Runs `fn` instead of the built-in CPU vocoder -- e.g. a ChunkedVocoder
+  /// on the Milk-V Duo's TPU (docs/milkv-duo.md). The audio callback is then
+  /// called once per chunk instead of once per speak().
+  void setVocoder(TinyTTSCore::VocoderFn fn) { core_.setVocoder(std::move(fn)); }
+
+  /// Runs `fn` instead of the built-in CPU flow where it can -- e.g. a
+  /// BucketedFlow on the Milk-V Duo's TPU (docs/milkv-duo.md). When `fn`
+  /// returns false, the CPU flow runs instead.
+  void setFlow(TinyTTSCore::FlowFn fn) { core_.setFlow(std::move(fn)); }
+
   /// Scales the PCM data written to the Print output (begin(Print&)/the
   /// no-arg begin()) -- 1.0 is the model's native (full-scale) loudness,
   /// 0.0 is silence. Perceived loudness is logarithmic, not linear (see

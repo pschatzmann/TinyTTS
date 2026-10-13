@@ -31,3 +31,9 @@ if(TINYTTS_ASAN)
   target_compile_options(test_main PRIVATE -fsanitize=address -g -O1)
   target_link_options(test_main PRIVATE -fsanitize=address)
 endif()
+
+# The Milk-V Duo TPU wrappers (src/TinyTTS/Cvi*.h) against a fake CVITEK
+# runtime (cvi_fake/, implemented in test_cvi.cpp) -- no TPU or SDK needed.
+add_executable(test_cvi test_cvi.cpp)
+target_include_directories(test_cvi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cvi_fake)
+target_link_libraries(test_cvi PRIVATE tinytts)
