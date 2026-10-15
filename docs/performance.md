@@ -179,6 +179,18 @@ this code has been measured on.
 samples, ~1.36s of audio at 44.1kHz) -- **~15.68s total**. `decoder` alone is ~87% of
 that, consistent with it dominating on every other platform in this document too.
 
+**Pi Zero W, decoder on the GPU** (`--qpu`, `QpuVocoder`, see `docs/rpi-zero-gpu.md`):
+current code and default model (`t_y=128`), `g2p` 162ms, `text_encoder` 59ms,
+`duration_predictor` 158ms, `flow` 1333ms, `decoder` **306ms** (CPU on the same build:
+13809ms) -- **~2.0s of synthesis**, 2.8s for the whole CLI run including startup (CPU:
+15.5s). The audio matches the CPU decoder to 78.8dB SNR.
+
+**Pi Zero W, flow and decoder on the GPU** (`--qpu`, adding `QpuFlow`): `g2p` 107ms,
+`text_encoder` 36ms, `duration_predictor` 94ms (`t_y=128`), `flow` **33ms** (CPU: 1333ms),
+`decoder` 308ms -- **~0.58s of synthesis**, 1.0s for the whole CLI run (CPU: 15.3s),
+faster than real time. The GPU flow also stays near-linear in length: 80ms at 349 frames
+and 135ms at 512, where the CPU takes 7.3s and 14.6s.
+
 **Pi 4 Model B** (quad-core Cortex-A72, ARMv8-A, NEON, ~1.5GHz -- core count directly
 confirmed via `nproc`, not assumed): `text_encoder` 13ms, `duration_predictor` 13ms
 (`t_y=117`), `flow` 215ms, `decoder` 1515ms -- **~1.76s total**, already faster than the

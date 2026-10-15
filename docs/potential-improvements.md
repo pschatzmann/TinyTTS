@@ -109,6 +109,12 @@ HiFi-GAN-style decoder to a lighter vocoder suitable for MCUs.
 - Pros: largest long-term speedup potential.
 - Cons: major model/training/porting effort; quality tuning needed.
 
+### Beyond microcontrollers: the Raspberry Pi Zero's GPU
+
+On the Pi Zero W, `QpuFlow` and `QpuVocoder` run the flow and the decoder on the VideoCore
+IV QPUs: "Hello world!" takes ~0.58 s of synthesis instead of ~15 s, faster than real time.
+See `docs/rpi-zero-gpu.md`.
+
 ## Phased implementation roadmap
 
 ### Phase A: Improve responsiveness quickly

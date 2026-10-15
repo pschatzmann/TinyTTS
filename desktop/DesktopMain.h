@@ -34,6 +34,10 @@
 #include "TinyTTS/CviTpuFlow.h"
 #include "TinyTTS/CviTpuVocoder.h"
 #endif
+#ifdef TINYTTS_HAVE_RPI_QPU
+#include "TinyTTS/QpuFlow.h"
+#include "TinyTTS/QpuVocoder.h"
+#endif
 
 #include <unistd.h>
 
@@ -134,6 +138,20 @@ class DesktopMain {
     if (!opt.tpu_model.empty() && !tpu_.checkModel(tts_.core())) return 1;
     if (!opt.tpu_flows.empty() && !tpu_flow_.checkModel(tts_.core())) return 1;
 #endif
+#ifdef TINYTTS_HAVE_RPI_QPU
+    // After tts_.begin(): QpuFlow/QpuVocoder prepare the loaded weights, in
+    // one block of GPU memory.
+    if (opt.qpu) {
+      const TinyTTSCore& core = tts_.core();
+      const uint32_t bytes =
+          QpuVocoder::arenaBytes(core.weights(), opt.qpu_frames) + QpuFlow::arenaBytes(opt.qpu_frames);
+      if (!qpu_conv_.begin(bytes) || !qpu_.begin(core.weights(), core.vocoder(), qpu_conv_, opt.qpu_frames) ||
+          !qpu_flow_.begin(core.weights(), qpu_conv_, opt.qpu_frames))
+        return 1;
+      tts_.setVocoder(qpu_.vocoderFn());
+      tts_.setFlow(qpu_flow_.flowFn());
+    }
+#endif
 
     // After tts_.begin(): the sample rate comes from the weights (a model
     // trained at e.g. 16 kHz says so in its weights.bin), and nothing is
@@ -220,6 +238,8 @@ class DesktopMain {
     std::string tpu_model;
     int tpu_context = 12;
     std::vector<std::string> tpu_flows;
+    bool qpu = false;
+    int qpu_frames = 512;
     bool help_requested = false;
   };
 
@@ -270,6 +290,13 @@ class DesktopMain {
                   "  --tpu-flow FILE       Run the flow on the TPU, from a cvimodel built by\n"
                   "                        research/milkv_duo/build_flow_cvimodels.sh. Repeat for\n"
                   "                        each length; longer sentences use the CPU flow.\n"
+#endif
+#ifdef TINYTTS_HAVE_RPI_QPU
+                  "  --qpu                 Run the flow and the decoder on the Raspberry Pi 1/Zero\n"
+                  "                        GPU (needs root and vc4-kms-v3d disabled, see\n"
+                  "                        docs/rpi-zero-gpu.md).\n"
+                  "  --qpu-frames N        Longest sentence for the GPU, in frames, default 512\n"
+                  "                        (~6 s of audio); longer ones run on the CPU.\n"
 #endif
                   "\n"
                   "  -h, --help            Show this help text.\n",
@@ -353,6 +380,14 @@ class DesktopMain {
         const char* v = next(a.c_str());
         if (!v) return false;
         opt.tpu_flows.push_back(v);
+#endif
+#ifdef TINYTTS_HAVE_RPI_QPU
+      } else if (a == "--qpu") {
+        opt.qpu = true;
+      } else if (a == "--qpu-frames") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.qpu_frames = std::atoi(v);
 #endif
       } else if (!a.empty() && a[0] == '-' && a != "-") {
         std::fprintf(stderr, "unknown option: %s\n", a.c_str());
@@ -544,6 +579,11 @@ class DesktopMain {
 #ifdef TINYTTS_HAVE_CVI_TPU
   CviTpuVocoder tpu_;  // before tts_: these must outlive tts_'s use of them
   CviTpuFlow tpu_flow_;
+#endif
+#ifdef TINYTTS_HAVE_RPI_QPU
+  QpuConv qpu_conv_;  // before tts_: these must outlive tts_'s use of them
+  QpuVocoder qpu_;
+  QpuFlow qpu_flow_;
 #endif
   // --weights data; declared before tts_ so it outlives it (setWeights()
   // borrows the pointer).
