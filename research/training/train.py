@@ -54,6 +54,7 @@ DEFAULTS = dict(
     batch_size=4,
     segment_frames=SEGMENT_FRAMES,
     max_steps=10000,
+    max_hours=0.0,
     learning_rate=2e-4,
     betas=[0.8, 0.99],
     eps=1e-9,
@@ -87,6 +88,8 @@ def parse_args():
     p.add_argument("--batch-size", type=int)
     p.add_argument("--segment-frames", type=int, help="decoder training slice in spectrogram frames (x hop length samples)")
     p.add_argument("--max-steps", type=int)
+    p.add_argument("--max-hours", type=float, help="stop (after saving a checkpoint) once this much wall time has passed, "
+                   "e.g. 11.5 for Kaggle's 12 h session limit; 0 = no limit. Continue later with --resume")
     p.add_argument("--learning-rate", type=float)
     p.add_argument("--lr-decay", type=float, help="ExponentialLR gamma, applied per epoch")
     p.add_argument("--c-mel", type=float)
@@ -192,6 +195,7 @@ def main():
         collate_fn=collate,
         num_workers=args.workers,
         persistent_workers=args.workers > 0,
+        pin_memory=device.type == "cuda",
     )
     print(f"{len(train_set)} training utterances, {len(loader)} batches/epoch", flush=True)
 
@@ -239,8 +243,9 @@ def main():
     seg_samples = args.segment_frames * hop
     net_g.train()
     net_d.train()
-    t_last = time.time()
-    while step < args.max_steps:
+    t_last = t_start = time.time()
+    time_up = False
+    while step < args.max_steps and not time_up:
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             net_g.update_mas_noise(step)
@@ -297,9 +302,12 @@ def main():
                 )
             if args.eval_every and step % args.eval_every == 0:
                 write_sample(args, audio, net_g, val_items, step, device)
-            if step % args.save_every == 0 or step >= args.max_steps:
+            time_up = bool(args.max_hours) and time.time() - t_start >= args.max_hours * 3600
+            if step % args.save_every == 0 or step >= args.max_steps or time_up:
                 save_checkpoint(args, audio, step, epoch, net_g, net_d, optim_g, optim_d, sched_g, sched_d)
-            if step >= args.max_steps:
+            if time_up:
+                print(f"--max-hours {args.max_hours} reached at step {step}; continue with --resume", flush=True)
+            if step >= args.max_steps or time_up:
                 break
         else:
             epoch += 1

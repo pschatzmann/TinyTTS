@@ -28,6 +28,8 @@ trained model can't drift from what the C++ port implements.
 | `train.py` | The training loop: CPU or CUDA, resumable, writes `G_<step>.pth` checkpoints and sample WAVs. |
 | `synthesize.py` | Text → WAV from any checkpoint, in Python, for a quick listen. |
 | `configs/en_ljspeech.json` | CPU-friendly defaults for fine-tuning on LJSpeech. |
+| `configs/en_ljspeech16k_gpu.json` | GPU defaults for the 16 kHz LJSpeech model (batch 16, full-size discriminator). |
+| `kaggle/tinytts_ljspeech16k.ipynb` | Kaggle notebook that trains the 16 kHz LJSpeech model on a GPU, see "Training on a Kaggle GPU". |
 | `docker/`, `compose.yaml` | Docker image with all of the above preinstalled (CPU or CUDA), see "Alternative: Docker". |
 
 Training only touches what the C++ runtime uses: `enc_p`, `flow`, `dp` (the deterministic
@@ -206,6 +208,44 @@ What makes CPU training feasible:
 - **Freezing.** `--freeze dec` keeps the vocoder fixed if only the prosody or voice timbre of the
   text side should change. This is useful for a fast first pass, but a new speaker usually
   needs the decoder trained too.
+
+### Training on a Kaggle GPU
+
+[`research/training/kaggle/tinytts_ljspeech16k.ipynb`](../research/training/kaggle/tinytts_ljspeech16k.ipynb)
+trains the 16 kHz LJSpeech model (`ljspeech16k`) on Kaggle's free GPUs, and ends with a
+`weights.bin` for the C++ library. It clones this repository from GitHub (`main`), so push your
+changes before running it.
+
+1. On kaggle.com, create a notebook with *File → Import Notebook* and choose the `.ipynb` file
+   (or its GitHub URL).
+2. In *Settings*, set **Accelerator** to *GPU T4 x2* or *GPU P100*, and turn **Internet** *On*.
+   Internet access needs a phone-verified Kaggle account.
+3. Run it with *Save Version → Save & Run All (Commit)*. That runs in the background for up to
+   12 hours with the browser closed, and keeps `/kaggle/working` as the version's output.
+
+The notebook does everything else itself:
+- **Setup:** installs the dependencies, but never replaces Kaggle's CUDA build of torch.
+- **Upstream code:** fetches the upstream model code at the same pinned commit as the Docker image.
+- **Dataset:** uses LJSpeech from an attached Kaggle dataset if there is one, and otherwise
+  downloads it. It then prepares the data at 16 kHz, which takes about 20–30 minutes.
+- **Training:** uses `configs/en_ljspeech16k_gpu.json`: batch 16, the full-size discriminator,
+  and 100,000 steps in total.
+- **Export:** writes `ljspeech16k_weights.bin` plus a test WAV to the output.
+
+The settings at the top choose where a new run starts: the released checkpoint by default, or
+one of your own `G_*.pth` files uploaded as a Kaggle dataset (`INIT_CHECKPOINT`). For example,
+the laptop run's `G_40000.pth` lets the GPU continue from there. They also set the batch size and
+the step and time limits.
+
+**Sessions are limited to 12 hours, and the GPU quota is about 30 hours per week.**
+`MAX_HOURS = 11` uses `train.py --max-hours`, which saves a checkpoint and stops cleanly in time
+for the export. To continue, add the previous version's output to the notebook (*Add Input →
+Notebook Output Files*) and run it again. The notebook finds the earlier checkpoints and the
+prepared dataset, copies them back to the same paths, and resumes with `--resume`.
+
+The notebook was tested end to end on CPU with a small dataset, including resuming in a second
+session, but not yet on a Kaggle GPU. Step times there are therefore still to be measured; check
+`s/step` in the log.
 
 ### Using the trained model
 

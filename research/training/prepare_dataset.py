@@ -129,6 +129,10 @@ def main():
     args = p.parse_args()
 
     audio_config_for(args.sample_rate)  # validate before spawning workers
+    # Load the frontend once here, before the worker pool: importing it may
+    # download G2P resources (NLTK data, the tokenizer), and N workers doing
+    # that at the same time corrupt each other's downloads.
+    get_frontend(args.lang)
     os.makedirs(os.path.join(args.out, "wavs"), exist_ok=True)
     rows = read_metadata(args.input)
     random.Random(args.seed).shuffle(rows)

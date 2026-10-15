@@ -234,8 +234,9 @@ static ChunkedVocoder::WindowFn cpuWindowFn(const Vocoder& dec) {
         Mat zv(ve - vb, zw.cols());
         for (int t = vb; t < ve; t++) std::copy(zw.row(t), zw.row(t) + zw.cols(), zv.row(t - vb));
         auto a = dec.forward(zv, gw);
-        std::fill(audio, audio + (size_t)zw.rows() * 512, 0.0f);
-        std::copy(a.begin(), a.end(), audio + (size_t)vb * 512);
+        const size_t hop = (size_t)dec.hopLength();  // 512 at 44.1 kHz, 256 at 16 kHz, ...
+        std::fill(audio, audio + (size_t)zw.rows() * hop, 0.0f);
+        std::copy(a.begin(), a.end(), audio + (size_t)vb * hop);
         return true;
     };
 }
@@ -257,7 +258,7 @@ static void testChunkedVocoder(ReferenceData& ref) {
     const int windows[] = {32, 64, 128};
     for (int W : windows) {
         ChunkedVocoder chunked;
-        bool began = chunked.begin(cpuWindowFn(dec), W, /*context=*/12);
+        bool began = chunked.begin(cpuWindowFn(dec), W, /*context=*/12, dec.hopLength());
         std::vector<float> out;
         int calls = 0;
         bool ok = began && chunked.forward(z, g, [&](const float* s, size_t n) {
@@ -277,7 +278,7 @@ static void testChunkedVocoder(ReferenceData& ref) {
     }
 
     ChunkedVocoder bad;
-    check(!bad.begin(cpuWindowFn(dec), 20, 10), "ChunkedVocoder rejects window <= 2*context");
+    check(!bad.begin(cpuWindowFn(dec), 20, 10, dec.hopLength()), "ChunkedVocoder rejects window <= 2*context");
 }
 
 // TinyTTSCore::setVocoder(): the replacement runs instead of the built-in
@@ -287,7 +288,7 @@ static void testExternalVocoder(const std::vector<uint8_t>& weights_buf, const s
     TinyTTSCore tts;
     tts.begin(weights_buf.data(), weights_buf.size(), cmudict_buf.data(), cmudict_buf.size());
     ChunkedVocoder chunked;
-    chunked.begin(cpuWindowFn(tts.vocoder()), 64, 12);
+    chunked.begin(cpuWindowFn(tts.vocoder()), 64, 12, tts.vocoder().hopLength());
     tts.setVocoder([&](const Mat& z, const Mat& g, const TinyTTSCore::AudioChunkFn& on_audio) {
         return chunked.forward(z, g, on_audio);
     });
@@ -298,7 +299,7 @@ static void testExternalVocoder(const std::vector<uint8_t>& weights_buf, const s
         calls++;
     });
     printf("y_len=%d, %d callback(s), %zu samples\n", info.y_len, calls, samples);
-    check(calls > 1 && samples == (size_t)info.y_len * 512, "external vocoder streams the whole utterance");
+    check(calls > 1 && samples == (size_t)info.y_len * tts.vocoder().hopLength(), "external vocoder streams the whole utterance");
 }
 
 // Hand-written DurationPredictor forward pass against the PyTorch reference

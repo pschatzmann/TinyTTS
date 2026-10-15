@@ -1,0 +1,17 @@
+{
+  "train": "data/ljspeech16k/train.txt",
+  "val": "data/ljspeech16k/val.txt",
+  "run_dir": "runs/ljspeech16k",
+  "init": "pretrained",
+  "batch_size": 16,
+  "workers": 4,
+  "max_steps": 100000,
+  "max_hours": 0,
+  "learning_rate": 0.0002,
+  "gan_start_step": 1000,
+  "disc_width": 1.0,
+  "log_every": 100,
+  "eval_every": 1000,
+  "save_every": 1000,
+  "keep_checkpoints": 3
+}

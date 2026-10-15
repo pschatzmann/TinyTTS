@@ -11,7 +11,7 @@ the header, whichever suits your board (see `docs/model-data.md`).
 | File | Sample rate | Voice | Size | Source |
 |---|---:|---|---:|---|
 | `default_weights.bin` | 44100 Hz | upstream release (male) | 2.07 MB | released `backtracking/tiny-tts` checkpoint |
-| `ljspeech16k_weights.bin` | 16000 Hz | LJSpeech (female) | 2.07 MB | fine-tuned with `research/training/` (step 20,000), see `docs/training.md` |
+| `ljspeech16k_weights.bin` | 16000 Hz | LJSpeech (female) | 2.07 MB | fine-tuned with `research/training/` (step 40,000), see `docs/training.md` |
 
 The output sample rate is stored in the weights file itself. Read `tts.getAudioSampleRate()`
 **after** `tts.begin()` to configure your audio output. On an ESP32-S3,
