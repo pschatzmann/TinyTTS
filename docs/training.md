@@ -243,8 +243,21 @@ for the export. To continue, add the previous version's output to the notebook (
 Notebook Output Files*) and run it again. The notebook finds the earlier checkpoints and the
 prepared dataset, copies them back to the same paths, and resumes with `--resume`.
 
+**Publishing as a Kaggle Model.** At the end, the notebook uploads the result as a new version
+of the Kaggle Model `MODEL_HANDLE` (default `pschatzmann/tinytts/other/ljspeech16k`; change the
+owner to your Kaggle user name). If the model doesn't exist yet, it is created as a private
+model. Each version contains `ljspeech16k_weights.bin`, the `G_<step>.pth` checkpoint, a sample
+WAV and a README. Uploading needs your Kaggle API token as a notebook secret named
+`KAGGLE_API_TOKEN` (*Add-ons → Secrets*). Without it, the upload step only prints a hint, and the
+files stay in the output. `PUBLISH_MODEL = False` turns publishing off. To download a version
+from a shell:
+
+```bash
+kaggle models instances versions download pschatzmann/tinytts/other/ljspeech16k/<version> -p ./model --untar
+```
+
 The notebook was tested end to end on CPU with a small dataset, including resuming in a second
-session, but not yet on a Kaggle GPU. Step times there are therefore still to be measured; check
+session and the publish step (with the upload itself stubbed out), but not yet on a Kaggle GPU. Step times there are therefore still to be measured; check
 `s/step` in the log.
 
 ### Using the trained model
