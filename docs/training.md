@@ -366,22 +366,42 @@ checkout), but no dataset download: the training data is `cmudict.json` from tha
 ```bash
 cd research/training
 python train_g2p.py                              # fine-tune the shipped weights, 3% holdout
-python train_g2p.py --epochs 60 --holdout 0      # final run on all words
+python train_g2p.py --epochs 2                    # less memorization, better on unseen words
 python train_g2p.py --scratch --epochs 80 --lr 2e-3
 ```
 
 | Option | Meaning |
 |---|---|
 | (default) | Starts from the shipped weights. `--scratch` starts from random weights instead. |
-| `--holdout F` | Fraction of words held out to measure generalization (default 0.03). `--holdout 0` is fine for the final run: the slim dictionary only stores the words the model gets wrong, so every word the model memorizes makes the dictionary smaller. With no holdout, the "best" checkpoint is chosen by training accuracy. |
+| `--epochs N` | Default 5. The learning rate decays linearly over these epochs. See "How many epochs" below. |
+| `--holdout F` | Fraction of words held out to measure generalization (default 0.03). The "best" checkpoint is the one with the best holdout accuracy. With `--holdout 0` there is no holdout, so the best checkpoint is chosen by training accuracy, which rewards memorizing. |
+| `--patience N` | Stops after N epochs without a holdout improvement (default 3, 0 = off). |
 | `--resume` | Continues an interrupted run from `g2p_last.pt`. |
 | `--log-every N` | Prints the running loss every N steps (default 50). |
 | `--no-rebuild` | Skips the automatic rebuild described below. |
 
 It prints the running loss, learning rate, steps per second and ETA every `--log-every` steps.
 After every epoch it prints the mean loss and the exact-match word accuracy on a training
-sample and, with a holdout, on the held-out words. A CPU needs about 4 minutes per epoch. CUDA
+sample and, with a holdout, on the held-out words. A CPU needs 2.5 to 5 minutes per epoch. CUDA
 is used automatically if available.
+
+### How many epochs
+
+Fine-tuning overfits quickly, and more epochs are not better. Measured on a 3% holdout (3,466
+words never used for training), starting from the shipped model at 69.6%:
+
+| Run | Holdout accuracy | Accuracy on all dictionary words |
+|---|---|---|
+| 1 epoch | 72.9% | 75.8% |
+| 5 epochs (default) | 71.6% | 79.3% |
+| 30 epochs | 70.1% (best, in epoch 1) → 65.1% at the end | 73.2% for the best checkpoint |
+
+Holdout accuracy measures words the model has never seen, which is what the model is for.
+Accuracy on dictionary words rises with more training because the model memorizes them. That
+makes the slim dictionary smaller, but it also makes the model worse on unseen words. Use 1
+to 2 epochs for the best behavior on unseen words, and 5 as a compromise. The differences
+between 1 and 5 epochs are small compared with the noise of a 3,466-word holdout, so don't
+read too much into them. The 30-epoch run lost accuracy on both measures.
 
 The output goes to `research/training/runs/g2p/`: `g2p_model.json` (same format as upstream's
 `g2p_model.json`), plus `g2p_best.pt` and `g2p_last.pt`.
@@ -425,7 +445,7 @@ the whole job (training and rebuild). Everything lands in the mounted `runs/` fo
 
 ```bash
 cd research/training
-docker compose run --rm train-cpu g2p --epochs 60 --holdout 0     # -> runs/g2p/export/*.bin
+docker compose run --rm train-cpu g2p --epochs 5     # -> runs/g2p/export/*.bin
 ```
 
 The options are the same as above. A CPU is enough for this model. `train-gpu` is faster.
