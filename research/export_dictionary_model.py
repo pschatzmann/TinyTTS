@@ -78,7 +78,8 @@ def quantize_rows(w):
 
 
 def main():
-    with open(MODEL_PATH, "r", encoding="utf-8") as f:
+    model_path = sys.argv[1] if len(sys.argv) > 1 else MODEL_PATH  # e.g. g2p_runs/g2p_model.json from train_g2p.py
+    with open(model_path, "r", encoding="utf-8") as f:
         raw = json.load(f)
 
     tensors = {}

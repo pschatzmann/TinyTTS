@@ -82,7 +82,7 @@ def main():
     with open(cmu_path, "r", encoding="utf-8") as f:
         cmu = json.load(f)
 
-    model = DictionaryModel()
+    model = DictionaryModel(sys.argv[1]) if len(sys.argv) > 1 else DictionaryModel()  # optional: model json from train_g2p.py
 
     words = sorted(cmu.keys())
     total = len(words)

@@ -1,14 +1,27 @@
 # Training: fine-tuning or training the model yourself
 
 Upstream [tronghieuit/tiny-tts](https://github.com/tronghieuit/tiny-tts) publishes the model
-and inference code, but no training code. `research/training/` fills that gap: it trains (or
+and inference code, but no training code. `research/training/` fills that gap. It trains (or
 fine-tunes) a checkpoint with exactly the same architecture, symbol table and tensor names as
 the released `G.pth`, so the result goes through the existing export path
 (`export_weights_and_vectors.py` → `export_headers.py`) and runs on the unchanged C++ library.
 
 Like the rest of `research/`, this is PC-side Python tooling and not part of the Arduino library.
 
-## How it works
+## What do you want to train?
+
+| Goal | Where to start |
+|---|---|
+| A new or different **voice** (LJSpeech, your own recordings) | [Setup](#setup), then [Voice model](#voice-model) |
+| A voice that is **cheap to synthesize** on a microcontroller (16 kHz) | [Choosing a sample rate](#choosing-a-sample-rate) |
+| Training on a **free GPU** | [Training on a Kaggle GPU](#training-on-a-kaggle-gpu) |
+| A better **pronunciation fallback** for words missing from the dictionary | [Training the G2P fallback model](#training-the-g2p-fallback-model) |
+| **Another language** | [Adding a language](#adding-a-language) |
+
+Contents: [Overview](#overview) · [Setup](#setup) · [Voice model](#voice-model) ·
+[G2P fallback model](#training-the-g2p-fallback-model)
+
+## Overview
 
 Upstream is a renamed MeloTTS / Bert-VITS2 model. Its code still contains every module's
 training path: the posterior encoder `enc_q`, the forward direction of the flows and of the
@@ -20,12 +33,13 @@ trained model can't drift from what the C++ port implements.
 
 | File | What it does |
 |---|---|
-| `prepare_dataset.py` | LJSpeech-layout dataset (`metadata.csv` + `wavs/`) → audio resampled to `--sample-rate` (default 44.1 kHz, see "Sample rate") + `train.txt`/`val.txt` filelists. Phonemization happens here, once. |
+| `prepare_dataset.py` | LJSpeech-layout dataset (`metadata.csv` + `wavs/`) → audio resampled to `--sample-rate` (default 44.1 kHz, see "Choosing a sample rate") + `train.txt`/`val.txt` filelists. Phonemization happens here, once. |
 | `frontends/` | Text → phone/tone/language ids, one module per language. `en.py` is upstream's own English pipeline (CMU dictionary + g2p_en fallback). |
-| `audio_config.py` | Derives hop, STFT, mel and vocoder layout from the output sample rate (see "Sample rate"). |
+| `audio_config.py` | Derives hop, STFT, mel and vocoder layout from the output sample rate (see "Choosing a sample rate"). |
 | `model_train.py` | `TrainableSynthesizer`: upstream `VoiceSynthesizer` plus MeloTTS's training `forward()` (MAS alignment, duration losses, random decoder slices). Adds no parameters. |
 | `discriminators.py`, `losses.py` | HiFi-GAN multi-period/scale discriminator and the VITS losses (mel L1, KL, duration, adversarial, feature matching). |
 | `train.py` | The training loop: CPU or CUDA, resumable, writes `G_<step>.pth` checkpoints and sample WAVs. |
+XX | Trains the neural G2P fallback model (`dictionary_model.bin`), not the voice, see "Training the G2P fallback model". |
 | `synthesize.py` | Text → WAV from any checkpoint, in Python, for a quick listen. |
 | `configs/en_ljspeech.json` | CPU-friendly defaults for fine-tuning on LJSpeech. |
 | `configs/en_ljspeech16k_gpu.json` | GPU defaults for the 16 kHz LJSpeech model (batch 16, full-size discriminator). |
@@ -36,6 +50,9 @@ Training only touches what the C++ runtime uses: `enc_p`, `flow`, `dp` (the dete
 duration predictor; the C++ runtime always uses it, never `sdp`), `emb_g` and `dec`. Two more
 parts are trained but never exported: `enc_q`, which is only used during training, and `sdp`,
 which is trained so that checkpoints stay complete.
+
+The G2P fallback model (`dictionary_model.bin`) is separate from the voice model. It has its own
+script, `train_g2p.py`, described in [Training the G2P fallback model](#training-the-g2p-fallback-model).
 
 ## Setup
 
@@ -95,7 +112,12 @@ remaining arguments are passed to the matching script unchanged.
   - `UPSTREAM_COMMIT`: the upstream model code to use.
   - `BAKE_CHECKPOINT=0`: leaves `G.pth` out of the image; it is then downloaded on first use.
 
-## English: LJSpeech
+## Voice model
+
+The steps below train the TTS model itself (`weights.bin`). The sections build on each other:
+quick start, then options, then where to run, then how to use the result.
+
+### Quick start: English LJSpeech
 
 [LJSpeech](https://keithito.com/LJ-Speech-Dataset/) has 13,100 clips (about 24 h) from one
 female speaker, at 22.05 kHz. They are resampled to the model's 44.1 kHz, so the trained voice
@@ -124,7 +146,7 @@ To listen to any checkpoint:
 python synthesize.py --checkpoint runs/ljspeech/G_5000.pth --text "Hello world." -o hello.wav
 ```
 
-### Sample rate
+### Choosing a sample rate
 
 The released model outputs 44.1 kHz audio. For a microcontroller speaker, 16 kHz (or even
 8 kHz) is usually enough, and it is cheaper to synthesize. The output rate is chosen once, when
@@ -257,8 +279,8 @@ kaggle models instances versions download pschatzmann/tinytts/other/ljspeech16k/
 ```
 
 The notebook was tested end to end on CPU with a small dataset, including resuming in a second
-session and the publish step (with the upload itself stubbed out), but not yet on a Kaggle GPU. Step times there are therefore still to be measured; check
-`s/step` in the log.
+session and the publish step (with the upload itself stubbed out), but not yet on a Kaggle GPU.
+Step times there are therefore still to be measured; check `s/step` in the log.
 
 ### Using the trained model
 
@@ -292,14 +314,14 @@ fallback model don't change, because they depend on the language and not on the 
 Note that this also replaces `research/test_vectors.bin`, which `test/main.cpp` validates
 against.
 
-## Your own voice
+### Your own voice
 
 Record mono WAV clips and write a `metadata.csv` with `clip_id|transcript` lines, using the
 same layout as LJSpeech. Any sample rate works; 44.1 kHz or higher keeps the full bandwidth.
 Clips of 2–10 s work best. Fine-tuning works from about an hour of clean audio. Then run
 `prepare_dataset.py --input <your dir> --out data/myvoice` and train as above.
 
-## Adding a language
+### Adding a language
 
 The model is already multi-lingual by construction. It has a shared symbol table (Chinese,
 Japanese, English, Korean, Spanish, French, German and Russian phoneme sets), a language
@@ -322,3 +344,66 @@ untrained. Adding a language takes four steps:
    This is the part that requires C++ work. The model weights themselves export and run
    unchanged.
 4. **Export.** Use the same `export_weights_and_vectors.py --checkpoint` path as for English.
+
+## Training the G2P fallback model
+
+`data/default_dictionary_model.bin` is not part of the voice model above. It is the small
+neural grapheme-to-phoneme model (single-layer 256-dim GRU encoder-decoder, ~833K parameters)
+that `DictionaryModel.h` uses for words missing from the dictionary.
+`research/training/train_g2p.py` trains it with exactly the architecture, vocabularies and
+greedy decode of the C++ runtime (and of `g2p_reference_numpy.py`), on the first pronunciation
+of every a-z word in `cmudict.json`.
+
+It needs the same [setup](#setup) as the voice training (torch and the upstream `tiny-tts`
+checkout), but no dataset download: the training data is `cmudict.json` from that checkout.
+
+### Run the training
+
+```bash
+cd research/training
+python train_g2p.py                              # fine-tune the shipped weights, 3% holdout
+python train_g2p.py --epochs 60 --holdout 0      # final run on all words
+python train_g2p.py --scratch --epochs 80 --lr 2e-3
+```
+
+| Option | Meaning |
+|---|---|
+| (default) | Starts from the shipped weights. `--scratch` starts from random weights instead. |
+| `--holdout F` | Fraction of words held out to measure generalization (default 0.03). `--holdout 0` is fine for the final run: the slim dictionary only stores the words the model gets wrong, so every word the model memorizes makes the dictionary smaller. With no holdout, the "best" checkpoint is chosen by training accuracy. |
+| `--resume` | Continues an interrupted run from `g2p_last.pt`. |
+| `--log-every N` | Prints the running loss every N steps (default 50). |
+| `--no-rebuild` | Skips the automatic rebuild described below. |
+
+It prints the running loss, learning rate, steps per second and ETA every `--log-every` steps.
+After every epoch it prints the mean loss and the exact-match word accuracy on a training
+sample and, with a holdout, on the held-out words. A CPU needs about 4 minutes per epoch. CUDA
+is used automatically if available.
+
+The output goes to `research/training/runs/g2p/`: `g2p_model.json` (same format as upstream's
+`g2p_model.json`), plus `g2p_best.pt` and `g2p_last.pt`.
+
+### Rebuild the dictionary
+
+When training finishes, the script rebuilds everything that depends on the model. These are the
+scripts in `research/`, run in this order:
+
+1. `export_dictionary_model.py` → `dictionary_model.bin` (int8-quantized)
+2. `compute_cmudict_exceptions.py` → `cmudict_exceptions.json` (takes a few minutes)
+3. `export_cmudict.py` → `cmudict.bin`, `cmudict_slim.bin`
+
+The slim dictionary must always be rebuilt from the model it ships with, because it contains
+exactly the words that model gets wrong. The rebuilt files are written to `research/`. To redo
+only the rebuild for an existing model (e.g. after `--no-rebuild`), run the three scripts from
+`research/`, passing `training/runs/g2p/g2p_model.json` to the first two.
+
+### Ship the result
+
+Copy the files over the defaults and regenerate the C++ headers:
+
+```bash
+cd research
+cp dictionary_model.bin ../data/default_dictionary_model.bin
+cp cmudict.bin          ../data/default_cmudict.bin
+cp cmudict_slim.bin     ../data/default_cmudict_slim.bin
+python export_headers.py                         # -> src/TinyTTS/data/*_data.h
+```
