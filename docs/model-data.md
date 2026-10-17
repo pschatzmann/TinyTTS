@@ -96,7 +96,9 @@ including the data headers to override it.
 The same data is also available as plain `.bin` files in the top-level `data/` directory
 (see `data/README.md`), ready to copy to LittleFS/FFat/SD for the `File` setters. That
 directory also has `ljspeech16k_weights.bin`, a 16 kHz model trained with
-`research/training/` (see `docs/training.md`).
+`research/training/` (see `docs/training.md`). The G2P fallback model
+(`default_dictionary_model`) can be retrained too, with `research/training/train_g2p.py`; the
+slim dictionary is then rebuilt from it.
 
 `research/` has the Python tooling that produces this data — `export_weights_and_vectors.py`
 (every hand-written-C++ stage's weights + validation vectors), `export_cmudict.py`

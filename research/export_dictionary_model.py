@@ -58,7 +58,9 @@ from export_cmudict import SYM_TO_ID, UNK_ID, map_phoneme, parse_phone  # noqa: 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "tiny-tts", "npm-package", "g2p_model.json")
-OUT_PATH = os.path.join(HERE, "dictionary_model.bin")
+# TINYTTS_G2P_OUT redirects the output (set by training/train_g2p.py); default: next to this script.
+OUT_DIR = os.environ.get("TINYTTS_G2P_OUT", HERE)
+OUT_PATH = os.path.join(OUT_DIR, "dictionary_model.bin")
 
 QUANTIZED_WEIGHTS = ["enc_w_ih", "enc_w_hh", "dec_w_ih", "dec_w_hh"]
 
@@ -113,6 +115,7 @@ def main():
     if unmapped:
         print(f"WARNING: {unmapped} phoneme(s) in g2p_model.json's vocab did not map to a known symbol")
 
+    os.makedirs(OUT_DIR, exist_ok=True)
     with open(OUT_PATH, "wb") as f:
         f.write(struct.pack("<iiii", hidden_dim, num_graphemes, num_dec_symbols, num_phonemes))
         f.write(np.ascontiguousarray(tensors["enc_emb"], dtype=np.float32).tobytes())

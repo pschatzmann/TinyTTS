@@ -12,6 +12,7 @@ TinyTTS training container -- see docs/training.md
   train      [args]  train.py             (fine-tune / train; --resume to continue)
   synthesize [args]  synthesize.py        (checkpoint + text -> wav)
   export     [args]  export_weights_and_vectors.py (checkpoint -> weights.bin for the C++ library)
+  g2p        [args]  train_g2p.py         (neural G2P fallback model -> runs/g2p/export/*.bin)
   shell              interactive shell
   <anything else>    run as a command
 
@@ -30,6 +31,7 @@ case "$cmd" in
   train)      exec python train.py "$@" ;;
   synthesize) exec python synthesize.py "$@" ;;
   export)     exec python /research/export_weights_and_vectors.py "$@" ;;
+  g2p)        exec python train_g2p.py "$@" ;;
   shell)      exec bash "$@" ;;
   help|-h|--help) usage ;;
   *)          exec "$cmd" "$@" ;;

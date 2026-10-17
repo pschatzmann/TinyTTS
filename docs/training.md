@@ -44,6 +44,7 @@ XX | Trains the neural G2P fallback model (`dictionary_model.bin`), not the voic
 | `configs/en_ljspeech.json` | CPU-friendly defaults for fine-tuning on LJSpeech. |
 | `configs/en_ljspeech16k_gpu.json` | GPU defaults for the 16 kHz LJSpeech model (batch 16, full-size discriminator). |
 | `kaggle/tinytts_ljspeech16k.ipynb` | Kaggle notebook that trains the 16 kHz LJSpeech model on a GPU, see "Training on a Kaggle GPU". |
+| `kaggle/tinytts_g2p.ipynb` | Kaggle notebook for the G2P fallback model, see "Training the G2P fallback model". |
 | `docker/`, `compose.yaml` | Docker image with all of the above preinstalled (CPU or CUDA), see "Alternative: Docker". |
 
 Training only touches what the C++ runtime uses: `enc_p`, `flow`, `dp` (the deterministic
@@ -52,7 +53,8 @@ parts are trained but never exported: `enc_q`, which is only used during trainin
 which is trained so that checkpoints stay complete.
 
 The G2P fallback model (`dictionary_model.bin`) is separate from the voice model. It has its own
-script, `train_g2p.py`, described in [Training the G2P fallback model](#training-the-g2p-fallback-model).
+script, `train_g2p.py`, and its own Kaggle notebook, described in
+[Training the G2P fallback model](#training-the-g2p-fallback-model).
 
 ## Setup
 
@@ -77,6 +79,7 @@ Lambda, …), because those services start containers directly. Colab and Kaggle
 Docker; there, use the plain setup above.
 
 The scripts and their options are the same as in the plain setup. Only how you start them changes.
+The image also covers the G2P fallback model (the `g2p` command, see "Training the G2P fallback model").
 `./data` and `./runs` (relative to `research/training/`) are mounted into the container, so
 datasets and checkpoints stay on the host. A run started in Docker can therefore be continued
 outside it with `--resume`, and vice versa.
@@ -91,8 +94,9 @@ docker compose run --rm train-cpu synthesize --checkpoint runs/ljspeech/G_5000.p
 docker compose run --rm train-cpu export --checkpoint runs/ljspeech/G_5000.pth --out-dir runs/ljspeech/export
 ```
 
-The first argument picks the step (`prepare`, `train`, `synthesize`, `export`, or `shell`). The
-remaining arguments are passed to the matching script unchanged.
+The first argument picks the step (`prepare`, `train`, `synthesize`, `export`, `g2p`, or
+`shell`). The remaining arguments are passed to the matching script unchanged. `g2p` trains the
+G2P fallback model, see [below](#docker-and-kaggle).
 
 - **GPU:** `train-gpu` needs an NVIDIA GPU and the
   [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
@@ -388,13 +392,17 @@ When training finishes, the script rebuilds everything that depends on the model
 scripts in `research/`, run in this order:
 
 1. `export_dictionary_model.py` → `dictionary_model.bin` (int8-quantized)
-2. `compute_cmudict_exceptions.py` → `cmudict_exceptions.json` (takes a few minutes)
+2. `compute_cmudict_exceptions.py` → `cmudict_exceptions.json` (takes about 10 minutes)
 3. `export_cmudict.py` → `cmudict.bin`, `cmudict_slim.bin`
 
+The outputs are written to `research/training/runs/g2p/export/`, so the files tracked in
+`research/` stay untouched. The scripts honor the `TINYTTS_G2P_OUT` environment variable for
+this; without it they write next to themselves, as before.
+
 The slim dictionary must always be rebuilt from the model it ships with, because it contains
-exactly the words that model gets wrong. The rebuilt files are written to `research/`. To redo
-only the rebuild for an existing model (e.g. after `--no-rebuild`), run the three scripts from
-`research/`, passing `training/runs/g2p/g2p_model.json` to the first two.
+exactly the words that model gets wrong. To redo only the rebuild for an existing model (e.g.
+after `--no-rebuild`), run the three scripts from `research/` with `TINYTTS_G2P_OUT` set, and
+pass `training/runs/g2p/g2p_model.json` to the first two.
 
 ### Ship the result
 
@@ -402,8 +410,30 @@ Copy the files over the defaults and regenerate the C++ headers:
 
 ```bash
 cd research
-cp dictionary_model.bin ../data/default_dictionary_model.bin
-cp cmudict.bin          ../data/default_cmudict.bin
-cp cmudict_slim.bin     ../data/default_cmudict_slim.bin
+cp training/runs/g2p/export/dictionary_model.bin ../data/default_dictionary_model.bin
+cp training/runs/g2p/export/cmudict.bin          ../data/default_cmudict.bin
+cp training/runs/g2p/export/cmudict_slim.bin     ../data/default_cmudict_slim.bin
 python export_headers.py                         # -> src/TinyTTS/data/*_data.h
 ```
+
+Always replace `dictionary_model.bin` and `cmudict_slim.bin` together.
+
+### Docker and Kaggle
+
+**Docker.** The image contains the G2P data and the export scripts, so the `g2p` command does
+the whole job (training and rebuild). Everything lands in the mounted `runs/` folder:
+
+```bash
+cd research/training
+docker compose run --rm train-cpu g2p --epochs 60 --holdout 0     # -> runs/g2p/export/*.bin
+```
+
+The options are the same as above. A CPU is enough for this model. `train-gpu` is faster.
+
+**Kaggle.** [`research/training/kaggle/tinytts_g2p.ipynb`](../research/training/kaggle/tinytts_g2p.ipynb)
+does the same on Kaggle. Import it like the voice notebook (see "Training on a Kaggle GPU") and
+turn **Internet** on. A GPU is optional. The settings at the top choose the epochs, learning
+rate, holdout and whether to start from scratch. It resumes from an earlier session's
+`g2p/g2p_last.pt` when you add that output as an input. The output has the three `.bin` files in
+`g2p/export/`, and the notebook can publish them as a Kaggle Model (`MODEL_HANDLE`, needs the
+`KAGGLE_API_TOKEN` secret, as for the voice model).

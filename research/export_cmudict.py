@@ -125,13 +125,16 @@ def main():
     full_path = os.path.join(HERE, "tiny-tts", "npm-package", "cmudict.json")
     with open(full_path, "r", encoding="utf-8") as f:
         full_cmu = json.load(f)
-    export_dict(full_cmu, os.path.join(HERE, "cmudict.bin"))
+    # TINYTTS_G2P_OUT redirects outputs and the exceptions input (set by training/train_g2p.py).
+    out_dir = os.environ.get("TINYTTS_G2P_OUT", HERE)
+    os.makedirs(out_dir, exist_ok=True)
+    export_dict(full_cmu, os.path.join(out_dir, "cmudict.bin"))
 
-    slim_path = os.path.join(HERE, "cmudict_exceptions.json")
+    slim_path = os.path.join(out_dir, "cmudict_exceptions.json")
     if os.path.exists(slim_path):
         with open(slim_path, "r", encoding="utf-8") as f:
             slim_cmu = json.load(f)
-        export_dict(slim_cmu, os.path.join(HERE, "cmudict_slim.bin"))
+        export_dict(slim_cmu, os.path.join(out_dir, "cmudict_slim.bin"))
     else:
         print(f"skipping cmudict_slim.bin -- {slim_path} not found "
               "(run compute_cmudict_exceptions.py first)")

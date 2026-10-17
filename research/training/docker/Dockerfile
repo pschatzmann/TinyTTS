@@ -8,9 +8,11 @@
 #
 # Layout inside the image mirrors the repo, so every script's relative paths
 # work unchanged:
-#   /research/tiny-tts/     upstream model code (pinned commit, tiny_tts/ only)
+#   /research/tiny-tts/     upstream model code (pinned commit, tiny_tts/ and npm-package/ only)
 #   /research/training/     this pipeline; data/ and runs/ are meant to be mounted
 #   /research/export_weights_and_vectors.py
+#   /research/{export_dictionary_model,compute_cmudict_exceptions,export_cmudict}.py, g2p_reference_numpy.py
+#                           the G2P fallback model's export scripts (train_g2p.py rebuilds with them)
 FROM python:3.12-slim
 
 # cpu (default, also arm64) or a CUDA wheel variant from
@@ -43,16 +45,18 @@ RUN pip install -r /tmp/requirements.lock
 
 # Upstream model code at a pinned commit. Sparse + blobless: the upstream
 # repo also carries large checkpoints/ONNX files that aren't needed here.
+# npm-package/ holds cmudict.json and g2p_model.json for train_g2p.py.
 RUN git init -q /research/tiny-tts \
     && cd /research/tiny-tts \
     && git remote add origin ${UPSTREAM_REPO} \
-    && git sparse-checkout set tiny_tts \
+    && git sparse-checkout set tiny_tts npm-package \
     && git fetch -q --depth 1 --filter=blob:none origin ${UPSTREAM_COMMIT} \
     && git checkout -q FETCH_HEAD \
     && rm -rf .git
 
 COPY training/ /research/training/
-COPY export_weights_and_vectors.py /research/
+COPY export_weights_and_vectors.py export_dictionary_model.py compute_cmudict_exceptions.py \
+     export_cmudict.py g2p_reference_numpy.py /research/
 
 # Pre-fetch everything the pipeline would otherwise download on first use:
 # NLTK data (g2p_en), the bert-base-uncased tokenizer (upstream's English

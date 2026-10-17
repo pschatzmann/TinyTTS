@@ -114,7 +114,10 @@ def main():
     print(f"exceptions (neither fallback gets it right, must stay in shipped dictionary): "
           f"{len(exceptions)} ({100 * len(exceptions) / total:.1f}%)")
 
-    out_path = os.path.join(HERE, "cmudict_exceptions.json")
+    # TINYTTS_G2P_OUT redirects the output (set by training/train_g2p.py); default: next to this script.
+    out_dir = os.environ.get("TINYTTS_G2P_OUT", HERE)
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "cmudict_exceptions.json")
     with open(out_path, "w") as f:
         json.dump(exceptions, f)
     print(f"wrote {out_path}: {os.path.getsize(out_path) / 1024 / 1024:.2f} MB (json, uncompressed)")

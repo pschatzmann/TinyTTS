@@ -25,8 +25,9 @@ Output: runs/g2p/g2p_model.json (and g2p_best.pt / g2p_last.pt for --resume).
 After training it automatically rebuilds everything that depends on the model
 (skip with --no-rebuild): export_dictionary_model.py -> dictionary_model.bin,
 compute_cmudict_exceptions.py -> cmudict_exceptions.json (a few minutes), and
-export_cmudict.py -> cmudict.bin + cmudict_slim.bin. To ship the result, run
-export_headers.py (-> src/TinyTTS/data/*.h) and copy the .bin files to ../data/.
+export_cmudict.py -> cmudict.bin + cmudict_slim.bin, all written to
+<out-dir>/export/. To ship the result, copy the .bin files to ../../data/default_*.bin
+and run export_headers.py (-> src/TinyTTS/data/*.h).
 """
 import argparse
 import base64
@@ -275,13 +276,15 @@ def main():
         return
     # The slim dictionary holds exactly the words this model gets wrong, so it must be
     # regenerated from the new model; dictionary_model.bin has to match it.
+    export_dir = os.path.join(args.out_dir, "export")
+    env = dict(os.environ, TINYTTS_G2P_OUT=export_dir)  # keep the tracked files in research/ untouched
     for script, extra in (("export_dictionary_model.py", [out_path]),
                           ("compute_cmudict_exceptions.py", [out_path]),
                           ("export_cmudict.py", [])):
         print(f"\n=== {script} ===", flush=True)
-        subprocess.run([sys.executable, os.path.join(RESEARCH, script), *extra], check=True, cwd=RESEARCH)
-    print("\nrebuilt dictionary_model.bin, cmudict_exceptions.json, cmudict.bin, cmudict_slim.bin in research/.")
-    print("To ship them: python export_headers.py, and copy the .bin files to ../data/default_*.bin")
+        subprocess.run([sys.executable, os.path.join(RESEARCH, script), *extra], check=True, cwd=RESEARCH, env=env)
+    print(f"\nrebuilt dictionary_model.bin, cmudict_exceptions.json, cmudict.bin, cmudict_slim.bin in {export_dir}")
+    print("To ship them: copy the .bin files to data/default_*.bin, then run research/export_headers.py")
 
 
 if __name__ == "__main__":

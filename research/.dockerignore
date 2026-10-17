@@ -3,6 +3,10 @@
 # checkpoints, or the historical ONNX/TFLite artifacts (several GB).
 *
 !export_weights_and_vectors.py
+!export_dictionary_model.py
+!compute_cmudict_exceptions.py
+!export_cmudict.py
+!g2p_reference_numpy.py
 !training/
 training/data/
 training/runs/
