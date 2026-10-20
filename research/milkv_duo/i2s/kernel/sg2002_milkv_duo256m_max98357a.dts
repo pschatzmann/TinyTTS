@@ -1,0 +1,45 @@
+// Milk-V Duo 256M with a MAX98357A I2S amplifier on I2S2 (the Ethernet pads).
+// The board's own device tree from duo-buildroot-sdk-v2, plus:
+//  - i2s2 again: cv181x_asic_qfn.dtsi deletes it for this package
+//    (same node as in cv181x_base.dtsi, with the interrupt from
+//    cv181x_base_riscv.dtsi);
+//  - the Ethernet MAC off, since I2S2 shares its pads;
+//  - the codec and the sound card (sound/soc/cvitek/cv1835_max98357a.c from
+//    max98357a-sound-card.patch).
+// See docs/milkv-duo.md in TinyTTS ("I2S amplifier (MAX98357A)").
+#include "sg2002_milkv_duo256m_musl_riscv64_sd.dts"
+
+/ {
+	i2s2: i2s@04120000 {
+		compatible = "cvitek,cv1835-i2s";
+		reg = <0x0 0x04120000 0x0 0x2000>;
+		clocks = <&i2s_mclk 0>;
+		clock-names = "i2sclk";
+		dev-id = <2>;
+		#sound-dai-cells = <0>;
+		dmas = <&dmac 6 1 1 /* read channel */
+			&dmac 1 1 1>; /* write channel */
+		dma-names = "rx", "tx";
+		capability = "txrx";
+		mclk_out = "false";
+		interrupts = <42 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-parent = <&plic0>;
+		status = "okay";
+	};
+
+	max98357a: max98357a {
+		#sound-dai-cells = <0>;
+		compatible = "maxim,max98357a";
+		status = "okay";
+	};
+
+	sound_max98357a {
+		compatible = "cvitek,cv1835-max98357a";
+		cvi,card_name = "cv1835_max98357a";
+		status = "okay";
+	};
+};
+
+&ethernet0 {
+	status = "disabled";
+};

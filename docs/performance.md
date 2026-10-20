@@ -524,13 +524,25 @@ relative-position terms are only computed inside their +-4-frame window, where t
 embeddings are non-zero (exact, about half of attention's work for long inputs). See
 `docs/tangnano20k.md`.
 
-## Milk-V Duo: decoder and flow on the TPU (not yet measured)
+## Milk-V Duo: decoder and flow on the TPU
 
 The Milk-V Duo 256M / Duo S port runs the desktop CLI on the C906 CPU, with the decoder
 (in fixed-size overlapping windows) and the flow (padded to fixed lengths) on the
-SG2002/SG2000 TPU in BF16. It's verified for accuracy on a PC (TPU-MLIR's simulator, a fake
-runtime for the C++ wrappers), but hasn't been run on the board, so there are no timing
-numbers yet. See `docs/milkv-duo.md`.
+SG2002/SG2000 TPU in BF16. Measured on a Duo 256M, "Hello world!" with the released
+44.1 kHz model:
+
+| Stage | C906 CPU | TPU |
+|---|---:|---:|
+| flow | 808 ms | 12 ms |
+| vocoder | 7,781 ms | 139 ms |
+| total, incl. startup | 8.85 s | 0.61 s |
+| 16 kHz model (1.04 s of audio): vocoder / total | 3,390 ms / 4.04 s | 49 ms / 0.67 s |
+
+On the CPU alone the vocoder is 88% of the time, as on every other CPU; the board has a
+single core, so `--threads` doesn't help (16 kHz model: 3.39 s vocoder, 4.04 s total). With
+both on the TPU, the remaining CPU stages (G2P, encoder, duration predictor: ~135 ms) are
+about half of the synthesis time. Accuracy on the board matches TPU-MLIR's simulator (22 dB
+waveform SNR for the decoder vs. the CPU output). See `docs/milkv-duo.md`.
 
 ## What was tried and didn't work (or wasn't worth it)
 

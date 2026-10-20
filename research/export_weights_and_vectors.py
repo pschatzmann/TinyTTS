@@ -55,9 +55,69 @@ from tiny_tts.utils import SEGMENT_FRAMES, N_SPEAKERS, MODEL_PARAMS
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def read_weights_bin(path):
+    """{name: float32 array} from a weights.bin written by this script (dtype 0/1/2, see the module doc)."""
+    tensors = {}
+    with open(path, "rb") as f:
+        while True:
+            (name_len,) = struct.unpack("<i", f.read(4))
+            if name_len == 0:
+                return tensors
+            name = f.read(name_len).decode("utf-8")
+            (ndims,) = struct.unpack("<i", f.read(4))
+            shape = struct.unpack(f"<{ndims}i", f.read(4 * ndims))
+            (dtype,) = struct.unpack("<i", f.read(4))
+            count = int(np.prod(shape))
+            if dtype == 0:
+                arr = np.frombuffer(f.read(4 * count), dtype="<f4")
+            elif dtype == 1:
+                arr = np.frombuffer(f.read(2 * count), dtype="<f2").astype(np.float32)
+            elif dtype == 2:
+                scales = np.frombuffer(f.read(4 * shape[0]), dtype="<f4")
+                q = np.frombuffer(f.read(count), dtype=np.int8).astype(np.float32)
+                arr = (q.reshape(shape[0], -1) * scales[:, None]).ravel()
+            else:
+                raise ValueError(f"{path}: tensor {name} has unknown dtype {dtype}")
+            tensors[name] = arr.reshape(shape).astype(np.float32)
+
+
+def load_weights_bin(path):
+    """(net_g, audio) rebuilt from an exported weights.bin instead of a checkpoint.
+
+    The model then has exactly the (float16 / INT8-dequantized) values the C++
+    library runs on, so e.g. TPU models exported from it match the weights.bin
+    even when its training checkpoint isn't at hand. Only inference parameters
+    are in the file: the posterior encoder (enc_q) and the BERT projection
+    weights stay at their initial values, which inference doesn't use."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "training"))
+    from audio_config import audio_config_for
+
+    tensors = read_weights_bin(path)
+    audio = audio_config_for(int(tensors.pop("meta.sample_rate")[0]))
+    upsample_rates = [int(r) for r in tensors.pop("meta.upsample_rates")]
+    if upsample_rates != audio.upsample_rates:
+        raise ValueError(f"{path}: upsample rates {upsample_rates} don't match {audio.sample_rate} Hz")
+    net_g = VoiceSynthesizer(
+        len(symbols), audio.spec_channels, SEGMENT_FRAMES, n_speakers=N_SPEAKERS, **audio.model_params()
+    )
+    net_g.eval()
+    net_g.dec.remove_weight_norm()  # the export's names are after this
+    missing, unexpected = net_g.load_state_dict({k: torch.from_numpy(v) for k, v in tensors.items()}, strict=False)
+    if unexpected:
+        raise ValueError(f"{path}: tensors not in the model: {unexpected[:5]}")
+    used = ("enc_p.", "flow.", "emb_g.", "dp.", "dec.")
+    missing = [k for k in missing if k.startswith(used) and k not in UNUSED_BERT_PROJ_WEIGHTS]
+    if missing:
+        raise ValueError(f"{path}: inference tensors missing from the file: {missing[:5]}")
+    for k in UNUSED_BERT_PROJ_WEIGHTS:  # dropped by the export; their input is always zero
+        net_g.state_dict()[k].zero_()
+    return net_g, audio
+
+
 def load_model(ckpt_path=None):
-    """ckpt_path: a G_*.pth (e.g. from training/train.py); default is the
-    released HuggingFace checkpoint the shipped weights come from.
+    """ckpt_path: a G_*.pth (e.g. from training/train.py), or an exported
+    weights.bin (see load_weights_bin()); default is the released HuggingFace
+    checkpoint the shipped weights come from.
 
     Returns (net_g, audio): `audio` is the checkpoint's AudioConfig
     (training/audio_config.py) -- sample rate and vocoder upsample stack;
@@ -65,6 +125,8 @@ def load_model(ckpt_path=None):
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "training"))
     from audio_config import audio_config_from_checkpoint
 
+    if ckpt_path is not None and ckpt_path.endswith(".bin"):
+        return load_weights_bin(ckpt_path)
     if ckpt_path is None:
         from huggingface_hub import hf_hub_download
 

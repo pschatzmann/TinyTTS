@@ -1,0 +1,146 @@
+Sound card for a MAX98357A I2S amplifier on I2S2 of the Milk-V Duo 256M
+(sound/soc/cvitek/cv1835_max98357a.c, with its Kconfig and Makefile entries).
+
+Applies to duo-buildroot-sdk-v2 (git apply, from the SDK's top directory);
+build_boot_sd.sh applies it. See docs/milkv-duo.md, "I2S amplifier (MAX98357A)"
+in TinyTTS.
+
+diff --git a/linux_5.10/sound/soc/cvitek/Kconfig b/linux_5.10/sound/soc/cvitek/Kconfig
+index 394d5d610..a9cedb7f9 100644
+--- a/linux_5.10/sound/soc/cvitek/Kconfig
++++ b/linux_5.10/sound/soc/cvitek/Kconfig
+@@ -197,3 +197,10 @@ config SND_SOC_CV1835_LT9611
+ 	tristate "Support for the lt9611 card"
+ 	help
+ 	  lt9611 codec enable.
++
++config SND_SOC_CV1835_MAX98357A
++	tristate "Support for a MAX98357A I2S amplifier on I2S2"
++	depends on SND_CV1835_I2S
++	select SND_SOC_MAX98357A
++	help
++	  Sound card for a MAX98357A on I2S2 (Milk-V Duo: the Ethernet pads).
+diff --git a/linux_5.10/sound/soc/cvitek/Makefile b/linux_5.10/sound/soc/cvitek/Makefile
+index 93060ca2b..1e5f7c0b1 100644
+--- a/linux_5.10/sound/soc/cvitek/Makefile
++++ b/linux_5.10/sound/soc/cvitek/Makefile
+@@ -79,3 +79,4 @@ endif
+ obj-$(CONFIG_CV1835_I2S_SUBSYS) += cv1835_i2s_subsys.o
+ 
+ obj-$(CONFIG_SND_SOC_CV1835_LT9611) += cv1835_lt9611.o
++obj-$(CONFIG_SND_SOC_CV1835_MAX98357A) += cv1835_max98357a.o
+diff --git a/linux_5.10/sound/soc/cvitek/cv1835_max98357a.c b/linux_5.10/sound/soc/cvitek/cv1835_max98357a.c
+new file mode 100644
+index 000000000..a6aed03d7
+--- /dev/null
++++ b/linux_5.10/sound/soc/cvitek/cv1835_max98357a.c
+@@ -0,0 +1,109 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * ALSA SoC machine driver: MAX98357A I2S amplifier on I2S2 (4120000.i2s) of the
++ * CVITEK CV180x/CV181x/SG200x (Milk-V Duo / Duo 256M). Based on the driver by
++ * Youkai (LangZhao), https://community.milkv.io/t/duo256m-add-max98357a-sound-card-done/1494
++ *
++ * The SoC is the I2S master (bit clock and word select), the MAX98357A a
++ * plain DAC without registers or MCLK. See docs/milkv-duo.md in TinyTTS.
++ */
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <sound/core.h>
++#include <sound/pcm.h>
++#include <sound/soc.h>
++
++/*
++ * The SoC's DMA driver (drivers/dma/cvitek/cvitek-dma.c) splits the ring buffer
++ * into descriptors of at most 64 bytes, but also of at most half the largest
++ * power of two that divides the buffer length. A buffer of 88200 bytes (0.5 s
++ * at 44.1 kHz) thus becomes 22050 4-byte descriptors, the allocation fails, and
++ * prep_dma_cyclic's ERR_PTR(-ENOMEM) crashes snd_dmaengine_pcm_trigger(), which
++ * only checks for NULL. Multiples of 128 bytes keep the descriptors at 64.
++ */
++static int cv1835_max98357a_startup(struct snd_pcm_substream *substream)
++{
++	struct snd_pcm_runtime *runtime = substream->runtime;
++	int ret;
++
++	ret = snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_PERIOD_BYTES, 128);
++	if (ret < 0)
++		return ret;
++	return snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 128);
++}
++
++static const struct snd_soc_ops cv1835_max98357a_ops = {
++	.startup = cv1835_max98357a_startup,
++};
++
++SND_SOC_DAILINK_DEFS(max98357a,
++	DAILINK_COMP_ARRAY(COMP_CPU("4120000.i2s")),
++	DAILINK_COMP_ARRAY(COMP_CODEC("max98357a", "HiFi")),
++	DAILINK_COMP_ARRAY(COMP_PLATFORM("4120000.i2s")));
++
++static struct snd_soc_dai_link cv1835_max98357a_dai[] = {
++	{
++		.name = "max98357a",
++		.stream_name = "max98357a i2s",
++		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_IB_NF |
++			   SND_SOC_DAIFMT_CBS_CFS,
++		.dpcm_playback = 1,
++		.ops = &cv1835_max98357a_ops,
++		SND_SOC_DAILINK_REG(max98357a),
++	},
++};
++
++static const struct snd_soc_dapm_widget cv1835_max98357a_widgets[] = {
++	SND_SOC_DAPM_SPK("SPKR", NULL),
++};
++
++static const struct snd_soc_dapm_route cv1835_max98357a_routes[] = {
++	{ "SPKR", NULL, "Speaker" },
++};
++
++static struct snd_soc_card cv1835_max98357a = {
++	.name = "cv1835_max98357a",
++	.owner = THIS_MODULE,
++	.dai_link = cv1835_max98357a_dai,
++	.num_links = ARRAY_SIZE(cv1835_max98357a_dai),
++	.dapm_widgets = cv1835_max98357a_widgets,
++	.num_dapm_widgets = ARRAY_SIZE(cv1835_max98357a_widgets),
++	.dapm_routes = cv1835_max98357a_routes,
++	.num_dapm_routes = ARRAY_SIZE(cv1835_max98357a_routes),
++};
++
++static int cv1835_max98357a_probe(struct platform_device *pdev)
++{
++	struct snd_soc_card *card = &cv1835_max98357a;
++	int ret;
++
++	card->dev = &pdev->dev;
++	of_property_read_string(pdev->dev.of_node, "cvi,card_name", &card->name);
++	platform_set_drvdata(pdev, card);
++
++	ret = devm_snd_soc_register_card(&pdev->dev, card);
++	if (ret && ret != -EPROBE_DEFER)
++		dev_err(&pdev->dev, "snd_soc_register_card failed (%d)\n", ret);
++	return ret;
++}
++
++static const struct of_device_id cv1835_max98357a_of_match[] = {
++	{ .compatible = "cvitek,cv1835-max98357a" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, cv1835_max98357a_of_match);
++
++static struct platform_driver cv1835_max98357a_driver = {
++	.driver = {
++		.name = "cv1835-max98357a",
++		.pm = &snd_soc_pm_ops,
++		.of_match_table = cv1835_max98357a_of_match,
++	},
++	.probe = cv1835_max98357a_probe,
++};
++module_platform_driver(cv1835_max98357a_driver);
++
++MODULE_DESCRIPTION("ALSA SoC CV1835 MAX98357A machine driver");
++MODULE_LICENSE("GPL");
++MODULE_ALIAS("platform:cv1835-max98357a");

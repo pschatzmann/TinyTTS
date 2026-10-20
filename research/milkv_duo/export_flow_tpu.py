@@ -93,6 +93,7 @@ def band_attention(self, query, key, value, mask=None):
     p_attn = F.softmax(scores, dim=-1)
     output = torch.matmul(p_attn, value)
     output = output + torch.matmul(abs_to_band(p_attn, w), self.emb_rel_v.unsqueeze(0))
+    output = output.transpose(2, 3).reshape(b, d, L)  # [b,h,L,k] -> [b,d,L], as upstream
     return output, p_attn
 
 

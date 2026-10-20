@@ -10,7 +10,9 @@
 | Raspberry Pi Zero W / Pi 4 (desktop CLI) | Runs | ~15.7 s / ~1.55 s |
 | Raspberry Pi Zero W, flow and decoder on the GPU (`--qpu`, `docs/rpi-zero-gpu.md`) | Runs on the board | ~0.58 s synthesis (1.0 s with startup) -- faster than real time |
 | Desktop PC (desktop CLI) | Runs | ~0.76 s (faster than real time) |
-| Milk-V Duo 256M / Duo S, TPU (`docs/milkv-duo.md`) | Checked on a PC only (simulator, fake runtime); **not yet run on the board** | not measured |
+| Milk-V Duo 256M (desktop CLI, `docs/milkv-duo.md`) | Runs on the board | ~8.85 s (~5.9x slower than real time) |
+| Milk-V Duo 256M, flow and decoder on the TPU (`docs/milkv-duo.md`) | Runs on the board; sentences over 1,024 frames (11.9 s) fall back to a slow CPU flow | ~0.61 s with startup -- faster than real time |
+| Milk-V Duo S, TPU | Same SoC family and build, not run on the board | not measured |
 
 See `docs/performance.md` for how these numbers were measured.
 

@@ -209,12 +209,13 @@ class DesktopMain {
       // speak() returning means synthesis finished, NOT that playback
       // finished -- MiniAudioStream::write() (called from onAudio() above)
       // only fills a ring buffer; a real-time callback thread on its own
-      // drains it asynchronously. Sleep for the known audio duration plus
-      // a fixed margin for MiniAudio's own internal buffering latency,
-      // rather than polling MiniAudioStream's internal state
-      // (is_playing/buffer_out aren't a stable public API).
-      double seconds = (double)total_samples_ / tts_.getAudioSampleRate();
-      std::this_thread::sleep_for(std::chrono::duration<double>(seconds + 0.3));
+      // drains it asynchronously. Sleep until the queued audio has played
+      // (play_end_, see onAudio()) plus a fixed margin for MiniAudio's own
+      // internal buffering latency, rather than polling MiniAudioStream's
+      // internal state (is_playing/buffer_out aren't a stable public API).
+      // Not the whole audio's duration: with sentence chunks and a
+      // streaming vocoder (setVocoder()), most of it has already played.
+      std::this_thread::sleep_until(play_end_ + std::chrono::milliseconds(300));
     }
     return 0;
   }
@@ -548,6 +549,14 @@ class DesktopMain {
     total_samples_ += count;
     if (!should_play) return;
 
+    // When the audio queued so far will have played: playback runs in real
+    // time from whenever data is available, so a chunk starts when the
+    // previous one ends, or now if the device has run dry in between.
+    auto now = std::chrono::steady_clock::now();
+    if (play_end_ < now) play_end_ = now;
+    play_end_ += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>((double)count / tts_.getAudioSampleRate()));
+
     pcm_buf_.resize(count);
     float gain = volumeToGain(1.0f);
     for (size_t i = 0; i < count; i++) {
@@ -592,6 +601,7 @@ class DesktopMain {
   std::vector<int16_t> pcm_buf_;
   std::vector<float> all_samples_;
   size_t total_samples_ = 0;
+  std::chrono::steady_clock::time_point play_end_{};
 };
 
 }  // namespace tinytts
