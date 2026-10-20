@@ -43,6 +43,17 @@ hand-written QPU kernels (`docs/rpi-zero-gpu.md`). The Milk-V build is the only 
 inference runtime (the vendor's `libcviruntime`) is involved, and only in the desktop CLI
 built for that board.
 
+## Text-to-speech over HTTP
+
+TinyTTS can also run as a small network service: send text with `GET /tts?text=...` or
+`POST /tts` and get MP3 back, or open the server in a browser for a form.
+
+- **On an ESP32:** the sketch [`examples/tts_webserver`](examples/tts_webserver/tts_webserver.ino)
+  serves it over WiFi, built on arduino-audio-tools (`MP3EncoderShine`).
+- **On Linux:** the desktop CLI does the same with `tinytts --serve PORT` -- e.g. on a Milk-V
+  Duo, where "Hello world!" comes back as MP3 in ~0.4 s (`docs/desktop.md`,
+  `docs/milkv-duo.md`).
+
 ## Documentation
 
 | Document | What's in it |
@@ -55,7 +66,7 @@ built for that board.
 | [`docs/tangnano20k.md`](docs/tangnano20k.md) | Running on the Sipeed Tang Nano 20K FPGA board, including its on-chip INT8 accelerator. |
 | [`docs/milkv-duo.md`](docs/milkv-duo.md) | Milk-V Duo 256M / Duo S: board setup, cross-compiling, and the flow and the decoder on the SG2002/SG2000 TPU -- faster than real time. |
 | [`docs/rpi-zero-gpu.md`](docs/rpi-zero-gpu.md) | Raspberry Pi Zero: the flow and the decoder on the VideoCore IV GPU (`--qpu`) -- faster than real time. |
-| [`docs/desktop.md`](docs/desktop.md) | The `desktop/` CLI (`tinytts`) -- building, installing, running, Unix piping. |
+| [`docs/desktop.md`](docs/desktop.md) | The `desktop/` CLI (`tinytts`) -- building, installing, running, Unix piping, and the HTTP server (`--serve`). |
 | [`docs/performance.md`](docs/performance.md) | Real-hardware optimization history: what worked, what didn't, and why. |
 | [`docs/potential-improvements.md`](docs/potential-improvements.md) | What's still open for moving TinyTTS closer to real-time synthesis. |
 | [`docs/phonemes.md`](docs/phonemes.md) | The phoneme symbols and stress tones the model takes, mapped to TinyTTSTools' phoneme ids. |

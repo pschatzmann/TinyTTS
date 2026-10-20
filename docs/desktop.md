@@ -127,6 +127,12 @@ Milk-V Duo only (built with -DTINYTTS_CVI_TPU=ON, see docs/milkv-duo.md):
   --tpu-flow FILE       Run the flow on the TPU, from a cvimodel built by
                         research/milkv_duo/build_flow_cvimodels.sh. Repeat for each
                         length; longer sentences use the CPU flow.
+  Without --tpu-model/--tpu-flow, the TPU is used by default: with the
+  decoder_<rate>hz_w*_bf16.cvimodel and flow_<rate>hz_l*_bf16.cvimodel files for the
+  voice's sample rate found in --tpu-dir.
+  --tpu-dir DIR         Where to look for them, default: the directory of the program
+                        (symbolic links resolved).
+  --cpu                 Run everything on the CPU.
 
 Raspberry Pi 1/Zero only (built with -DTINYTTS_RPI_QPU=ON, see docs/rpi-zero-gpu.md):
   --qpu                 Run the flow and the decoder on the GPU (needs root and

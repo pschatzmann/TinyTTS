@@ -63,6 +63,9 @@ AudioInfo info;
 // One fetch() POST, played from the downloaded result: a plain <form> POST
 // makes the browser navigate to the audio, and its media player then drops
 // that connection and requests the URL again as GET -- without the text.
+// A short silent clip is started during the click: browsers that only allow
+// sound right after a user action (e.g. Firefox, Safari) then also play the
+// result, which arrives seconds later.
 const char* html_form =
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -73,10 +76,13 @@ const char* html_form =
     "<audio id='a' controls></audio>"
     "<script>"
     "b.onclick=async()=>{b.disabled=true;s.textContent='synthesizing...';"
+    "a.src='data:audio/wav;base64,UklGRogAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YWQAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA';"
+    "a.play().catch(()=>{});"
     "try{const r=await fetch('/tts',{method:'POST',"
     "headers:{'Content-Type':'text/plain'},body:t.value});"
     "if(!r.ok)throw new Error(await r.text());"
-    "a.src=URL.createObjectURL(await r.blob());a.play();s.textContent='';"
+    "a.src=URL.createObjectURL(await r.blob());s.textContent='';"
+    "a.play().catch(()=>{s.textContent='press play'});"
     "}catch(e){s.textContent='error: '+e.message}"
     "b.disabled=false};"
     "</script></body></html>";
