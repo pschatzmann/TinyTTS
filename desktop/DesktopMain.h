@@ -23,14 +23,24 @@
 // translation unit in the whole desktop target (desktop/main.cpp) -- do
 // not #include this from a second .cpp, or the build fails with duplicate
 // miniaudio symbol definitions at link time.
+// Before AudioTools.h: its AudioBasic/Net.h defines htonl() & co. as
+// macros, which break <netinet/in.h> when included after it.
+#include "DesktopHttpServer.h"
 #include "AudioTools.h"
 #include "AudioTools/AudioLibs/MiniAudioStream.h"
+#ifdef TINYTTS_HAVE_MP3
+#include "AudioTools/AudioCodecs/CodecMP3Shine.h"
+#endif
 #include "TinyTTS.h"
 #include "TinyTTS/data/default_cmudict_data.h"
 #include "TinyTTS/data/default_cmudict_slim_data.h"
 #include "TinyTTS/data/default_dictionary_model_data.h"
 #include "TinyTTS/data/default_weights_data.h"
 #ifdef TINYTTS_HAVE_CVI_TPU
+#include <dirent.h>
+
+#include <algorithm>
+
 #include "TinyTTS/CviTpuFlow.h"
 #include "TinyTTS/CviTpuVocoder.h"
 #endif
@@ -76,7 +86,7 @@ class DesktopMain {
     if (!parseArgs(argc, argv, opt)) return opt.help_requested ? 0 : 1;
 
     std::string text;
-    if (!resolveText(opt, text)) return 1;
+    if (opt.serve_port == 0 && !resolveText(opt, text)) return 1;
 
     tts_.setVolume(opt.volume);
     tts_.setNoiseScale(opt.noise_scale);
@@ -98,7 +108,7 @@ class DesktopMain {
     if (!opt.tpu_flows.empty()) tts_.setFlow(tpu_flow_.flowFn());
 #endif
 
-    bool should_play = !opt.no_play && opt.output_file.empty() && !opt.to_stdout;
+    bool should_play = !opt.no_play && opt.output_file.empty() && !opt.to_stdout && opt.serve_port == 0;
 
     if (opt.weights_file.empty()) {
       tts_.setWeights(default_weights, default_weights_len);
@@ -137,6 +147,7 @@ class DesktopMain {
     // another checkpoint would silently play at the wrong speed/pitch.
     if (!opt.tpu_model.empty() && !tpu_.checkModel(tts_.core())) return 1;
     if (!opt.tpu_flows.empty() && !tpu_flow_.checkModel(tts_.core())) return 1;
+    if (opt.tpu_model.empty() && opt.tpu_flows.empty() && !opt.cpu_only) findTpuModels(opt);
 #endif
 #ifdef TINYTTS_HAVE_RPI_QPU
     // After tts_.begin(): QpuFlow/QpuVocoder prepare the loaded weights, in
@@ -152,6 +163,8 @@ class DesktopMain {
       tts_.setFlow(qpu_flow_.flowFn());
     }
 #endif
+
+    if (opt.serve_port != 0) return serve(opt);
 
     // After tts_.begin(): the sample rate comes from the weights (a model
     // trained at e.g. 16 kHz says so in its weights.bin), and nothing is
@@ -239,8 +252,16 @@ class DesktopMain {
     std::string tpu_model;
     int tpu_context = 12;
     std::vector<std::string> tpu_flows;
+    std::string tpu_dir;  // default: the program's own directory
+    bool cpu_only = false;
     bool qpu = false;
     int qpu_frames = 512;
+    int serve_port = 0;
+#ifdef TINYTTS_HAVE_MP3
+    bool serve_mp3 = true;
+#else
+    bool serve_mp3 = false;
+#endif
     bool help_requested = false;
   };
 
@@ -259,6 +280,17 @@ class DesktopMain {
                   "  --stdout              Write WAV bytes to stdout instead of playing --\n"
                   "                        for piping, e.g. %s --stdout | aplay, or > out.wav\n"
                   "  --no-play             Skip playback (implied by -o/--stdout).\n"
+                  "  --serve PORT          Run as HTTP text-to-speech server instead: audio from\n"
+                  "                        GET /tts?text=... or POST /tts (text as body), and a\n"
+                  "                        form at GET / -- see docs/desktop.md.\n"
+                  "  --serve-format mp3|wav\n"
+                  "                        Audio format of the --serve replies, default "
+#ifdef TINYTTS_HAVE_MP3
+                  "mp3.\n"
+#else
+                  "wav\n"
+                  "                        (built without MP3 support: -DTINYTTS_DESKTOP_MP3=OFF).\n"
+#endif
                   "\n"
                   "Voice tuning:\n"
                   "  --volume VALUE        0.0-1.0, default 1.0\n"
@@ -291,6 +323,12 @@ class DesktopMain {
                   "  --tpu-flow FILE       Run the flow on the TPU, from a cvimodel built by\n"
                   "                        research/milkv_duo/build_flow_cvimodels.sh. Repeat for\n"
                   "                        each length; longer sentences use the CPU flow.\n"
+                  "  Without --tpu-model/--tpu-flow, the TPU is used by default: with the\n"
+                  "  decoder_<rate>hz_w*_bf16.cvimodel and flow_<rate>hz_l*_bf16.cvimodel files\n"
+                  "  for the voice's sample rate found in --tpu-dir.\n"
+                  "  --tpu-dir DIR         Where to look for them, default: the directory of\n"
+                  "                        this program (symbolic links resolved).\n"
+                  "  --cpu                 Run everything on the CPU.\n"
 #endif
 #ifdef TINYTTS_HAVE_RPI_QPU
                   "  --qpu                 Run the flow and the decoder on the Raspberry Pi 1/Zero\n"
@@ -330,6 +368,31 @@ class DesktopMain {
         opt.to_stdout = true;
       } else if (a == "--no-play") {
         opt.no_play = true;
+      } else if (a == "--serve") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.serve_port = std::atoi(v);
+        if (opt.serve_port <= 0 || opt.serve_port > 65535) {
+          std::fprintf(stderr, "--serve needs a port number, got: %s\n", v);
+          return false;
+        }
+      } else if (a == "--serve-format") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        std::string s = v;
+        if (s == "wav") {
+          opt.serve_mp3 = false;
+        } else if (s == "mp3") {
+#ifdef TINYTTS_HAVE_MP3
+          opt.serve_mp3 = true;
+#else
+          std::fprintf(stderr, "--serve-format mp3: built without MP3 support (-DTINYTTS_DESKTOP_MP3=OFF)\n");
+          return false;
+#endif
+        } else {
+          std::fprintf(stderr, "--serve-format must be 'mp3' or 'wav', got: %s\n", v);
+          return false;
+        }
       } else if (a == "--volume") {
         const char* v = next(a.c_str());
         if (!v) return false;
@@ -381,6 +444,12 @@ class DesktopMain {
         const char* v = next(a.c_str());
         if (!v) return false;
         opt.tpu_flows.push_back(v);
+      } else if (a == "--tpu-dir") {
+        const char* v = next(a.c_str());
+        if (!v) return false;
+        opt.tpu_dir = v;
+      } else if (a == "--cpu") {
+        opt.cpu_only = true;
 #endif
 #ifdef TINYTTS_HAVE_RPI_QPU
       } else if (a == "--qpu") {
@@ -401,6 +470,125 @@ class DesktopMain {
     }
     return true;
   }
+
+  /// --serve: answers HTTP requests until the process is terminated. Each
+  /// request is synthesized sentence by sentence like the CLI input, with
+  /// the same voice settings as the command line, and every sentence is
+  /// sent as soon as it is ready: as MP3 (MP3EncoderShine), or as a
+  /// streamed WAV, whose header can't carry the final length (see
+  /// wavHeader()).
+  int serve(const Options& opt) {
+    DesktopHttpServer::SynthesizeFn wav = [this, &opt](const std::string& text, const DesktopHttpServer::WriteFn& write) {
+      std::string header = wavHeader(tts_.getAudioSampleRate(), kStreamedWavBytes);
+      if (!write(header.data(), header.size())) return false;
+      for (const std::string& chunk : splitIntoChunks(text)) {
+        all_samples_.clear();
+        if (!tts_.speak(chunk)) return false;
+        std::vector<int16_t> pcm = toPcm(all_samples_, opt.volume);
+        if (!write((const char*)pcm.data(), pcm.size() * sizeof(int16_t))) return false;
+      }
+      all_samples_.clear();
+      return true;
+    };
+#ifdef TINYTTS_HAVE_MP3
+    DesktopHttpServer::SynthesizeFn mp3 = [this, &opt](const std::string& text, const DesktopHttpServer::WriteFn& write) {
+      WritePrint out(write);
+      audio_tools::MP3EncoderShine encoder;
+      encoder.setBitrate(64);  // plenty for mono speech
+      encoder.setOutput(out);
+      encoder.setAudioInfo(audio_tools::AudioInfo(tts_.getAudioSampleRate(), tts_.getAudioChannels(),
+                                                  tts_.getAudioBitsPerSample()));
+      if (!encoder.begin()) return false;
+      for (const std::string& chunk : splitIntoChunks(text)) {
+        all_samples_.clear();
+        if (!tts_.speak(chunk)) return false;
+        std::vector<int16_t> pcm = toPcm(all_samples_, opt.volume);
+        encoder.write((const uint8_t*)pcm.data(), pcm.size() * sizeof(int16_t));
+        if (!out.ok) break;  // the client has gone away
+      }
+      all_samples_.clear();
+      encoder.end();  // writes the last, partial frame
+      return out.ok;
+    };
+    DesktopHttpServer server(opt.serve_mp3 ? mp3 : wav, opt.serve_mp3 ? "audio/mpeg" : "audio/wav");
+#else
+    DesktopHttpServer server(wav, "audio/wav");
+#endif
+    if (!server.begin(opt.serve_port)) return 1;
+    server.run();
+    return 0;
+  }
+
+#ifdef TINYTTS_HAVE_MP3
+  /// Print adapter: the MP3 encoder's output -> the HTTP client. Always
+  /// reports the full length as written: the encoder's writeBlocking()
+  /// retries until everything is accepted, so a client that hung up would
+  /// otherwise make it loop forever -- `ok` records that instead.
+  struct WritePrint : public Print {
+    explicit WritePrint(const DesktopHttpServer::WriteFn& fn) : write_fn(fn) {}
+    size_t write(uint8_t ch) override { return write(&ch, 1); }
+    size_t write(const uint8_t* data, size_t len) override {
+      if (ok) ok = write_fn((const char*)data, len);
+      return len;
+    }
+    const DesktopHttpServer::WriteFn& write_fn;
+    bool ok = true;
+  };
+#endif
+
+#ifdef TINYTTS_HAVE_CVI_TPU
+  /// The TPU by default: loads the decoder and flow models for the loaded
+  /// voice's sample rate from --tpu-dir (default: next to the program, e.g.
+  /// /root/tpu/ for /root/tpu/tinytts or a link to it). After tts_.begin(),
+  /// which provides the sample rate. Models that don't fit the weights are
+  /// skipped with a warning, so this never makes a run fail.
+  void findTpuModels(const Options& opt) {
+    std::string dir = opt.tpu_dir;
+    if (dir.empty()) {
+      char exe[1024];
+      ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+      if (n <= 0) return;
+      dir.assign(exe, n);
+      dir = dir.substr(0, dir.find_last_of('/'));
+    }
+    const std::string rate = std::to_string(tts_.getAudioSampleRate()) + "hz_";
+    const std::string suffix = "_bf16.cvimodel";
+    std::vector<std::string> decoders, flows;
+    DIR* d = opendir(dir.c_str());
+    if (d == nullptr) return;
+    while (dirent* e = readdir(d)) {
+      std::string name = e->d_name;
+      if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+        continue;
+      if (name.rfind("decoder_" + rate + "w", 0) == 0) decoders.push_back(dir + "/" + name);
+      if (name.rfind("flow_" + rate + "l", 0) == 0) flows.push_back(dir + "/" + name);
+    }
+    closedir(d);
+    std::sort(decoders.begin(), decoders.end());
+    std::sort(flows.begin(), flows.end());
+
+    if (!decoders.empty()) {
+      if (tpu_.begin(decoders[0].c_str(), opt.tpu_context) && tpu_.checkModel(tts_.core())) {
+        tts_.setVocoder(tpu_.vocoderFn());
+        std::fprintf(stderr, "TPU decoder: %s\n", decoders[0].c_str());
+      } else {
+        tpu_.end();
+        std::fprintf(stderr, "skipping %s: the decoder runs on the CPU\n", decoders[0].c_str());
+      }
+    }
+    for (const std::string& f : flows) {
+      if (tpu_flow_.add(f.c_str())) std::fprintf(stderr, "TPU flow: %s\n", f.c_str());
+    }
+    if (tpu_flow_.maxLength() > 0) {
+      if (tpu_flow_.checkModel(tts_.core())) {
+        tts_.setFlow(tpu_flow_.flowFn());
+      } else {
+        tpu_flow_.end();
+        std::fprintf(stderr, "skipping the flow models: the flow runs on the CPU\n");
+      }
+    }
+  }
+#endif
 
   /// Splits `text` into sentence-sized pieces so run() can call speak()
   /// once per sentence instead of once for the whole input -- see run()'s
@@ -492,15 +680,21 @@ class DesktopMain {
   // mirrors TinyTTS.h's own volumeToGain() dB taper (see this file's
   // onAudio() for why that's duplicated here rather than reused).
   static void writeWav(std::ostream& f, const std::vector<float>& samples, int sample_rate, float volume) {
-    float gain = volumeToGain(volume);
-    std::vector<int16_t> pcm(samples.size());
-    for (size_t i = 0; i < samples.size(); i++) {
-      float s = samples[i] * gain;
-      if (s > 1.0f) s = 1.0f;
-      if (s < -1.0f) s = -1.0f;
-      pcm[i] = (int16_t)(s * 32767.0f);
-    }
+    std::vector<int16_t> pcm = toPcm(samples, volume);
     uint32_t data_bytes = (uint32_t)(pcm.size() * sizeof(int16_t));
+    f << wavHeader(sample_rate, data_bytes);
+    f.write((const char*)pcm.data(), data_bytes);
+    f.flush();
+  }
+
+  /// Data size for a WAV whose length isn't known when the header is
+  /// written (--serve): the largest the header can hold, the usual
+  /// convention for streamed WAV -- players just read until the end.
+  static constexpr uint32_t kStreamedWavBytes = 0xFFFFFFFFu - 36;
+
+  /// The 44 byte RIFF/WAVE header for mono 16 bit PCM
+  static std::string wavHeader(int sample_rate, uint32_t data_bytes) {
+    std::ostringstream f;
     uint32_t byte_rate = (uint32_t)sample_rate * 1 /*channels*/ * 2 /*bytes/sample*/;
     uint16_t block_align = 2;
     uint16_t bits_per_sample = 16;
@@ -522,8 +716,20 @@ class DesktopMain {
     f.write((const char*)&bits_per_sample, 2);
     f.write("data", 4);
     f.write((const char*)&data_bytes, 4);
-    f.write((const char*)pcm.data(), data_bytes);
-    f.flush();
+    return f.str();
+  }
+
+  /// Float samples -> int16 PCM, scaled by --volume
+  static std::vector<int16_t> toPcm(const std::vector<float>& samples, float volume) {
+    float gain = volumeToGain(volume);
+    std::vector<int16_t> pcm(samples.size());
+    for (size_t i = 0; i < samples.size(); i++) {
+      float s = samples[i] * gain;
+      if (s > 1.0f) s = 1.0f;
+      if (s < -1.0f) s = -1.0f;
+      pcm[i] = (int16_t)(s * 32767.0f);
+    }
+    return pcm;
   }
 
   // Mirrors TinyTTS.h's own volumeToGain() (a dB taper -- perceived

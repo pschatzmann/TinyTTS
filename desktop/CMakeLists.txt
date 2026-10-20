@@ -89,6 +89,10 @@ if(TINYTTS_CVI_TPU)
   # libcviruntime.so pulls in libcvikernel.so etc. from the same directory.
   target_link_libraries(tinytts_desktop PRIVATE ${CVIRUNTIME_LIBRARY})
   target_link_options(tinytts_desktop PRIVATE "-Wl,-rpath-link,${CVIRUNTIME_LIB_DIR}")
+  # Where the board's image keeps libcviruntime.so: the program then also
+  # starts without LD_LIBRARY_PATH, which only login shells get from
+  # /etc/profile -- not e.g. `ssh root@192.168.42.1 'tinytts ...'`.
+  target_link_options(tinytts_desktop PRIVATE "-Wl,-rpath,/mnt/system/lib")
 endif()
 
 # Raspberry Pi 1 / Zero: the decoder on the VideoCore IV GPU (QpuVocoder,
@@ -97,6 +101,21 @@ endif()
 option(TINYTTS_RPI_QPU "Build the desktop CLI with the Raspberry Pi 1/Zero GPU vocoder (--qpu)" OFF)
 if(TINYTTS_RPI_QPU)
   target_compile_definitions(tinytts_desktop PRIVATE TINYTTS_HAVE_RPI_QPU)
+endif()
+
+# MP3 replies for `tinytts --serve` (MP3EncoderShine from arduino-audio-tools,
+# see DesktopMain.h's serve()): fetches https://github.com/pschatzmann/codec-shine,
+# a small fixed-point MP3 encoder in plain C. With OFF, --serve replies with WAV
+# only. To use a local checkout instead of fetching it, configure with
+# -DFETCHCONTENT_SOURCE_DIR_CODEC_SHINE=/path/to/codec-shine.
+option(TINYTTS_DESKTOP_MP3 "Build the desktop CLI with MP3 output for --serve (fetches codec-shine)" ON)
+if(TINYTTS_DESKTOP_MP3)
+  FetchContent_Declare(codec_shine
+    GIT_REPOSITORY "https://github.com/pschatzmann/codec-shine.git"
+    GIT_TAG main)
+  FetchContent_MakeAvailable(codec_shine)
+  target_link_libraries(tinytts_desktop PRIVATE codec-shine)
+  target_compile_definitions(tinytts_desktop PRIVATE TINYTTS_HAVE_MP3)
 endif()
 
 # Without this, `cmake --install`/`make install` silently installs nothing

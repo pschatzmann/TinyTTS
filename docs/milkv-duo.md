@@ -40,6 +40,7 @@ the rest (`docs/performance.md`).
 4. [Audio output](#audio-output)
    - [Options](#options)
    - [Linux remote execution](#linux-remote-execution)
+   - [HTTP server](#http-server)
    - [I2S amplifier (MAX98357A)](#i2s-amplifier-max98357a)
    - [USB speaker](#usb-speaker)
 5. [Technical background](#technical-background)
@@ -301,10 +302,23 @@ cmake -S . -B build_duo -DCMAKE_TOOLCHAIN_FILE=cmake/milkv-duo.cmake \
 cmake --build build_duo -j
 ```
 
+The build also fetches [codec-shine](https://github.com/pschatzmann/codec-shine), the MP3
+encoder for the [HTTP server](#http-server); add `-DTINYTTS_DESKTOP_MP3=OFF` to leave it out.
+
 ### Install and run
 
 The board already has the TPU runtime (`/mnt/system/lib/libcviruntime.so`), so only the
-program and the models need to be copied:
+program and the models need to be copied, into the same directory. The program finds the
+runtime in `/mnt/system/lib` by itself (no `LD_LIBRARY_PATH` needed), and it uses the TPU by
+default:
+
+- **Models.** Without `--tpu-model`/`--tpu-flow`, it loads `decoder_<rate>hz_w*_bf16.cvimodel`
+  and `flow_<rate>hz_l*_bf16.cvimodel` from its own directory, for the sample rate of the
+  loaded voice (44100, or 16000 with the 16 kHz weights). Symbolic links are resolved, so
+  `ln -s /root/tpu/tinytts /usr/bin/tinytts` puts it on the `PATH` and still finds the models.
+  `--tpu-dir DIR` looks elsewhere; the chosen models are listed on stderr.
+- **Fallback.** Models that don't fit the weights are skipped with a warning, and that part
+  runs on the CPU. Without any models it runs all on the CPU, as does `--cpu`.
 
 ```bash
 cd research/milkv_duo/out
@@ -316,12 +330,13 @@ On the board:
 
 ```bash
 cd /root/tpu
-export LD_LIBRARY_PATH=/mnt/system/lib
+./tinytts --no-play -o hello.wav "Hello world!"
+./tinytts --no-play --cpu -o cpu.wav "Hello world!"  # all on the CPU, for comparison
+# the same with explicit models, e.g. to try other ones:
 ./tinytts --no-play --tpu-model decoder_44100hz_w128_bf16.cvimodel \
   --tpu-flow flow_44100hz_l128_bf16.cvimodel --tpu-flow flow_44100hz_l256_bf16.cvimodel \
   --tpu-flow flow_44100hz_l512_bf16.cvimodel --tpu-flow flow_44100hz_l1024_bf16.cvimodel \
   -o hello.wav "Hello world!"
-./tinytts --no-play -o cpu.wav "Hello world!"        # all on the CPU, for comparison
 ```
 
 The flow line on stderr says `(external)` when the TPU ran it. For a first check, compare
@@ -390,14 +405,11 @@ milkv_duo/build_flow_cvimodels.sh 16000
 scp milkv_duo/out/*16000hz*_bf16.cvimodel ../data/ljspeech16k_weights.bin root@192.168.42.1:/root/tpu/
 ```
 
-On the board, in `/root/tpu` (with `LD_LIBRARY_PATH=/mnt/system/lib`):
+On the board, in `/root/tpu` -- the 16 kHz models are picked automatically for the 16 kHz
+weights:
 
 ```bash
-./tinytts --no-play --weights ljspeech16k_weights.bin \
-  --tpu-model decoder_16000hz_w128_bf16.cvimodel \
-  --tpu-flow flow_16000hz_l128_bf16.cvimodel --tpu-flow flow_16000hz_l256_bf16.cvimodel \
-  --tpu-flow flow_16000hz_l512_bf16.cvimodel --tpu-flow flow_16000hz_l1024_bf16.cvimodel \
-  -o hello16k.wav "Hello world!"
+./tinytts --no-play --weights ljspeech16k_weights.bin -o hello16k.wav "Hello world!"
 ```
 
 The scripts take the sample rate, the output samples per frame (hop) and the vocoder's
@@ -430,6 +442,7 @@ the speech:
 | Option | Quality | What it takes |
 |---|---|---|
 | [Linux remote execution](#linux-remote-execution): synthesize on the board, play on a Linux PC | good | nothing on the board; SSH and `aplay` on the PC |
+| [HTTP server](#http-server): the board as a text-to-speech service, MP3 over the network | good | nothing on the board; any HTTP client or browser |
 | [I2S amplifier (MAX98357A)](#i2s-amplifier-max98357a) on I2S2 | good | a rebuilt kernel (`boot.sd`); uses the Ethernet pads |
 | [USB speaker](#usb-speaker) / sound card | good | the USB-C port in host mode, which ends the USB network |
 | Built-in DAC | poor | Duo 256M users report mostly pops and noise |
@@ -458,27 +471,53 @@ DUO=root@192.168.1.50 research/milkv_duo/duo-say.sh "Another board"
 The board's timings go to stderr; add `2>/dev/null` to hide them. A 2.6s sentence takes about
 1s from the command to the WAV, SSH included.
 
-**By hand.** The same with a plain `ssh` command. On the CPU only, with the `tinytts` from
-[TinyTTS on the CPU](#tinytts-on-the-cpu) in `/root`:
+**By hand.** The same with a plain `ssh` command. With the CPU-only `tinytts` from
+[TinyTTS on the CPU](#tinytts-on-the-cpu) in `/root` -- or the TPU build, if `/root/tinytts`
+is a link to `/root/tpu/tinytts`:
 
 ```bash
 ssh root@192.168.42.1 './tinytts --stdout "Hello world!"' | aplay
 ```
 
-With the TPU:
+With the TPU build (which uses the TPU by default, see [Install and run](#install-and-run)):
 
 ```bash
-ssh root@192.168.42.1 'cd /root/tpu && LD_LIBRARY_PATH=/mnt/system/lib ./tinytts --stdout \
-  --tpu-model decoder_44100hz_w128_bf16.cvimodel \
-  --tpu-flow flow_44100hz_l128_bf16.cvimodel --tpu-flow flow_44100hz_l256_bf16.cvimodel \
-  --tpu-flow flow_44100hz_l512_bf16.cvimodel --tpu-flow flow_44100hz_l1024_bf16.cvimodel \
-  "Hello world!"' | aplay
+ssh root@192.168.42.1 '/root/tpu/tinytts --stdout "Hello world!"' | aplay
 ```
 
 Any player that reads a WAV from standard input works in place of `aplay`, e.g.
 `paplay`, `pw-play -` or `ffplay -nodisp -autoexit -`. Since the whole WAV is written at the
 end (its header needs the length), playback on the PC starts once the board has synthesized
 all of the text; for long texts, call it once per sentence or paragraph.
+
+### HTTP server
+
+`tinytts --serve PORT` runs the board as a text-to-speech service: any device on the network
+sends text over HTTP and gets MP3 back (WAV with `--serve-format wav`). It's the same service
+as the ESP32 sketch `examples/tts_webserver`; [docs/desktop.md](desktop.md#http-server) has
+the details. The MP3 encoder (codec-shine) is part of the regular build, see
+[Build the CLI with the TPU runtime](#build-the-cli-with-the-tpu-runtime).
+
+On the board (the flow and the decoder run on the TPU by default, see
+[Install and run](#install-and-run)):
+
+```bash
+/root/tpu/tinytts --serve 8080
+```
+
+From the PC, or in a browser: `http://192.168.42.1:8080/` shows a form, and
+`http://192.168.42.1:8080/tts?text=Hello%20world` (or `/?text=...`) plays the text directly.
+
+```bash
+curl "http://192.168.42.1:8080/tts?text=Hello%20world!" -o hello.mp3
+curl --data-binary @script.txt http://192.168.42.1:8080/tts | ffplay -nodisp -autoexit -
+```
+
+Measured over the USB network: "Hello world!" (1.5s of audio) takes 0.43s from the request to
+the complete MP3, two sentences (9.0s of audio) 2.9s -- MP3 encoding on the board included.
+Every sentence is sent as soon as it is ready, so a long text streams and doesn't have to fit
+into the board's memory. Add `&` and `nohup` (or a line in `/mnt/system/auto.sh`) to keep it
+running after you log out. There's no authentication: only run it on a network you trust.
 
 ### I2S amplifier (MAX98357A)
 

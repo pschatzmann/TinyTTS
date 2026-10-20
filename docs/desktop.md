@@ -16,6 +16,7 @@ when you explicitly ask for it (see below).
   (`src/TinyTTS/data/default_weights_data.h` + the slimmed dictionary + neural G2P fallback)
   `examples/tts_i2s_output/` uses. The compiled-in model can be replaced at runtime with
   `--weights FILE` (see "Choosing a model" below).
+- `desktop/DesktopHttpServer.h` -- the small POSIX-socket HTTP server behind `--serve`.
 - `desktop/main.cpp` -- a one-line `main()` that just calls `DesktopMain::run(argc, argv)`.
 - `desktop/CMakeLists.txt` -- fetches `arduino-audio-tools` and `miniaudio.h`, builds the
   `tinytts` binary.
@@ -93,6 +94,9 @@ Output:
   --stdout              Write WAV bytes to stdout instead of playing -- for piping,
                         e.g. tinytts --stdout | aplay, or > out.wav
   --no-play             Skip playback (implied by -o/--stdout).
+  --serve PORT          Run as HTTP text-to-speech server instead (see "HTTP server" below).
+  --serve-format mp3|wav
+                        Audio format of the --serve replies, default mp3.
 
 Voice tuning:
   --volume VALUE        0.0-1.0, default 1.0
@@ -161,6 +165,41 @@ tinytts --weights data/ljspeech16k_weights.bin -o hello16k.wav "Hello world!"
 tinytts -o full.wav "Hello world!"
 tinytts --decoder-precision int8 -o int8.wav "Hello world!"
 ```
+
+### HTTP server
+
+`--serve PORT` turns `tinytts` into a text-to-speech service with the same endpoints as the
+ESP32 sketch `examples/tts_webserver`. It's most useful on a board that synthesizes faster
+than real time (Milk-V Duo, Raspberry Pi Zero with `--qpu`), so other devices on the network
+can use it:
+
+| Request | Reply |
+|---|---|
+| `GET /tts?text=Hello%20world` | MP3 of the URL-encoded `text` parameter |
+| `POST /tts` with the text as body | MP3 (form data `text=...` works too) |
+| `GET /?text=Hello%20world` | the same as `/tts` |
+| `GET /` | a small HTML form for trying it in a browser |
+
+```sh
+tinytts --serve 8080 --length-scale 1.1          # voice options apply to every request
+curl "http://localhost:8080/tts?text=Hello%20world" -o hello.mp3
+curl --data-binary @script.txt http://localhost:8080/tts | ffplay -nodisp -autoexit -
+tinytts --serve 8080 --serve-format wav          # WAV instead, e.g. for ... | aplay
+```
+
+The replies are MP3 (64 kbps mono, encoded with arduino-audio-tools' `MP3EncoderShine`, like
+the ESP32 sketch), or WAV with `--serve-format wav`. Requests are handled one at a time. Each
+one is synthesized sentence by sentence like the CLI input, and every sentence is sent as soon
+as it is ready, so playback can start before the whole text is done and a long text never has
+to fit into memory. The length isn't known up front, so the reply has no `Content-Length` and
+ends when the connection closes; a WAV reply carries the largest possible length in its
+header, which players read as "until the end of the data". The server listens on all
+interfaces and has no authentication, so only run it on a network you trust.
+
+MP3 support needs [codec-shine](https://github.com/pschatzmann/codec-shine), which the build
+fetches by default. Configure with `-DTINYTTS_DESKTOP_MP3=OFF` to build without it (then
+`--serve` replies with WAV only), or with
+`-DFETCHCONTENT_SOURCE_DIR_CODEC_SHINE=/path/to/codec-shine` to use a local checkout.
 
 ### Choosing a model
 
