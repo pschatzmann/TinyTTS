@@ -17,9 +17,14 @@ dictionary (--holdout 0) is legitimate for the final run -- every word the
 model memorizes is a word the slim dictionary no longer has to carry.
 
 Usage (from research/training/):
-    python train_g2p.py                               # fine-tune, 3% holdout
-    python train_g2p.py --epochs 60 --holdout 0       # final run on all words
+    python train_g2p.py                               # fine-tune, 5 epochs, 3% holdout
+    python train_g2p.py --epochs 2                    # less memorization, better on unseen words
     python train_g2p.py --scratch --epochs 80 --lr 2e-3
+
+Epochs: fine-tuning overfits quickly. Held-out accuracy peaks after 1-5 epochs and then
+falls (30 epochs: 92% train but 65% holdout), while accuracy on dictionary words keeps rising
+(memorization). Fewer epochs generalize better to words outside the dictionary, which is
+what the model is for; more epochs shrink the slim dictionary. The default (5) is a middle.
 
 Output: runs/g2p/g2p_model.json (and g2p_best.pt / g2p_last.pt for --resume).
 After training it automatically rebuilds everything that depends on the model
@@ -173,12 +178,14 @@ def accuracy(model, items, device, bs=1024):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", default=os.path.join(HERE, "runs", "g2p"))
-    ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--epochs", type=int, default=5, help="the LR decays linearly over these")
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=5e-4, help="peak LR; decays linearly to 5%%")
     ap.add_argument("--holdout", type=float, default=0.03, help="fraction of words held out (0 = none)")
     ap.add_argument("--scratch", action="store_true", help="random init instead of the shipped weights")
     ap.add_argument("--resume", action="store_true", help="continue from g2p_last.pt in --out-dir")
+    ap.add_argument("--patience", type=int, default=3,
+                    help="stop after this many epochs without a holdout improvement (0 = off; needs a holdout)")
     ap.add_argument("--log-every", type=int, default=50, help="print running loss every N steps")
     ap.add_argument("--no-rebuild", action="store_true",
                     help="skip rebuilding dictionary_model.bin / cmudict_exceptions.json / cmudict*.bin after training")
@@ -212,7 +219,7 @@ def main():
     total_steps = args.epochs * ((len(train) + args.batch_size - 1) // args.batch_size)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: max(0.05, 1 - s / max(1, total_steps)))
 
-    start_epoch, best = 0, -1.0
+    start_epoch, best, stale = 0, -1.0, 0
     last_path = os.path.join(args.out_dir, "g2p_last.pt")
     best_path = os.path.join(args.out_dir, "g2p_best.pt")
     if args.resume and os.path.exists(last_path):
@@ -259,10 +266,15 @@ def main():
         print(f"epoch {epoch + 1}/{args.epochs} loss {loss_sum / n:.4f} train-acc {tr:.4f}"
               + (f" holdout-acc {ho:.4f}" if hold else "") + f" ({time.time() - t0:.0f}s)", flush=True)
         if score > best:
-            best = score
+            best, stale = score, 0
             torch.save(model.state_dict(), best_path)
+        else:
+            stale += 1
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                     "epoch": epoch + 1, "best": best}, last_path)
+        if hold and args.patience and stale >= args.patience:
+            print(f"no holdout improvement for {stale} epochs, stopping early")
+            break
 
     model.load_state_dict(torch.load(best_path, map_location=device))
     out_path = os.path.join(args.out_dir, "g2p_model.json")

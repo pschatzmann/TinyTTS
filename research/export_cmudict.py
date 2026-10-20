@@ -50,9 +50,17 @@ import os
 import struct
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tiny-tts"))
+# Load symbols.py by path instead of `from tiny_tts.text.symbols import symbols`: importing the
+# tiny_tts package runs its __init__, which needs transformers, torch and more, none of which
+# this export needs (symbols.py itself has no imports).
+import importlib.util
 
-from tiny_tts.text.symbols import symbols
+_spec = importlib.util.spec_from_file_location(
+    "tiny_tts_symbols",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "tiny-tts", "tiny_tts", "text", "symbols.py"))
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+symbols = _mod.symbols
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
