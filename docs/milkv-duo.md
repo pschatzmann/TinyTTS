@@ -43,6 +43,7 @@ the rest (`docs/performance.md`).
    - [I2S amplifier (MAX98357A)](#i2s-amplifier-max98357a)
    - [USB speaker](#usb-speaker)
 5. [Technical background](#technical-background)
+   - [Model source code](#model-source-code)
    - [Decoder: overlapping windows](#decoder-overlapping-windows)
    - [Flow: fixed lengths](#flow-fixed-lengths)
    - [Precision: BF16, not INT8](#precision-bf16-not-int8)
@@ -662,6 +663,47 @@ a hub doesn't help with the default image: its kernel has no USB network drivers
 ---
 
 ## Technical background
+
+### Model source code
+
+The model is defined in PyTorch in the upstream project,
+[tronghieuit/tiny-tts](https://github.com/tronghieuit/tiny-tts), which `research/tiny-tts/` is
+a clone of (gitignored; see `docs/research.md` for how to get it). The ONNX export doesn't take
+the whole model: each export script wraps one stage of it in a small module.
+
+**The model: `research/tiny-tts/tiny_tts/models/synthesizer.py`.** `VoiceSynthesizer` is the
+top-level model and combines the stages:
+
+| Attribute | Class | Stage |
+|---|---|---|
+| `enc_p` | `PhonemeEncoder` | text encoder (transformer) |
+| `dp` / `sdp` | `DurationEstimator` / `VariationalDurationModel` | duration predictor |
+| `flow` | `FlowBlock` / `AttentionFlowBlock` | normalizing flow |
+| `dec` | `WaveformDecoder` | vocoder (HiFi-GAN style) |
+| `emb_g` | embedding | speaker |
+
+`VoiceSynthesizer.infer()` is the clearest high-level view of how the data moves through the
+stages: text encoder, durations, alignment, the prior `z_p`, `flow(reverse=True)`, then the
+decoder. The building blocks are in `tiny_tts/nn/`: `modules.py` (convolution and residual
+blocks), `attentions.py` (relative-position attention), `transforms.py` and `commons.py`
+(flow coupling layers, masks, alignment). `docs/architecture.md` describes the same four
+stages with a data-flow diagram, and the C++ implementation in `src/TinyTTS/` mirrors them.
+
+**What goes into the ONNX export:**
+
+| ONNX model | Exported module | Where |
+|---|---|---|
+| `decoder_<rate>hz_w<W>.onnx` | `DecoderWindow`: the unchanged `WaveformDecoder` layers, with a `mask` multiplied in before every convolution | `research/milkv_duo/export_decoder_tpu.py` |
+| `flow_<rate>hz_l<L>.onnx` | `FlowReverse`: `net_g.flow` run in reverse | `research/milkv_duo/export_flow_tpu.py` |
+
+`DecoderWindow.forward()` reproduces `WaveformDecoder.forward()` step by step (`conv_pre`,
+the upsampling layers with their residual blocks, `conv_post`, `tanh`) and only adds the mask,
+see [Decoder: overlapping windows](#decoder-overlapping-windows). `FlowReverse` uses the
+upstream flow as it is; before the export, `use_band_attention()` and `use_flip_as_conv()`
+replace the three operations TPU-MLIR can't compile for cv181x, see
+[Flow: fixed lengths](#flow-fixed-lengths). Both scripts load the weights with
+`export_weights_and_vectors.load_model()` (a `G_*.pth`, an exported `weights.bin`, or by
+default the released model).
 
 ### Decoder: overlapping windows
 
